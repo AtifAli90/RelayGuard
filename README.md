@@ -1,5 +1,11 @@
 # RelayGuard — Replay-Safe Execution Gateway for AI-Agent Tool Calls
 
+[![RelayGuard CI](https://github.com/AtifAli90/RelayGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/AtifAli90/RelayGuard/actions)
+![Python](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%2B-336791?logo=postgresql)
+![License](https://img.shields.io/badge/License-MIT-green)
+
 RelayGuard is a focused, production-aware FastAPI service demonstrating **replay-safe execution for AI-agent tool actions**. Built on **PostgreSQL** using atomic transactions, concurrency-safe uniqueness constraints, and deterministic payload hashing, RelayGuard prevents duplicate side effects when tool invocations are replayed following network drops or agent retry loops.
 
 > **Quest Status:** Initial starter scaffold originated as an illustrative SQLite prototype. During the timed engineering assessment, it was migrated end-to-end to PostgreSQL with Docker Compose, Psycopg 3, atomic concurrency handling, trigger-based fault injection testing, and empirical verification.
