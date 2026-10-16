@@ -129,7 +129,7 @@ Full console output for every command is preserved in [docs/TEST_REPORT.md](docs
 ```text
 python -m pytest -v
 ...
-10 passed, 1 warning in 19.45s
+10 passed, 1 warning in 18.27s
 ```
 
 Tests cover: baseline defect reproduction, exact replay deduplication, payload conflict (HTTP 409), input validation (HTTP 422), 10-thread concurrency safety, database fault-injection atomicity, health probe, multi-key repeatability, database-unavailability HTTP 503, and credential-masking verification.
@@ -156,12 +156,12 @@ The fixed path required marginally more time (~1.25 ms/request) for atomic key-c
 During this session, a reconstructed AI proposal archetype illustrating a naive check-then-act query pattern (`SELECT ... if not found INSERT ...`) was evaluated and **rejected**:
 
 - **Candidate Defects:**
-  1. *Immediate Foreign-Key Failure:* In RelayGuard's schema (`app/storage.py`), `effects.idempotency_key` carries a foreign key referencing `actions.idempotency_key`. The candidate inserts into `effects` before `actions`. On any fresh key, PostgreSQL raises `ForeignKeyViolation`. The exception handler catches this, rolls back the transaction, and returns HTTP 500 (`detail=str(exc)`). No effect is ever committed, breaking all fresh requests.
-  2. *Security & Error Disclosure:* Raw database exception strings are exposed directly to API callers, leaking driver internals and potential connection parameters, alongside missing guaranteed connection cleanup in a `finally` block.
-  3. *General Concurrency Race:* In scenarios without foreign-key constraints and with reversed insert order, check-then-act logic introduces a concurrency race window where concurrent threads both observe "key not found".
+  1. *Immediate Foreign-Key Failure:* In RelayGuard's schema (`app/storage.py`), `effects.idempotency_key` carries a foreign key referencing `actions.idempotency_key`. The candidate inserts into `effects` before `actions`. On every fresh key, PostgreSQL raises `ForeignKeyViolation`. The exception handler catches this, rolls back the transaction, and returns HTTP 500 (`detail=str(exc)`). No rows are committed; every fresh action fails.
+  2. *Transactional Rollback & Concurrency Failure:* Because both inserts share a transaction and `connection.rollback()` runs on exception, and because `effects.idempotency_key` has a `UNIQUE` constraint, the candidate does not leave multiple committed database effects. However, instead of safely returning a cached HTTP 200 response (`replayed: true`), concurrent replays crash with HTTP 500. Furthermore, if non-database external side effects (e.g. emails, webhooks) were executed prior to commit, they could not be rolled back.
+  3. *Security & Resource Leakage:* Raw driver exception strings are returned directly to callers (`detail=str(exc)`), leaking database structure and credentials, and connections are not deterministically closed in a `finally` block.
 - **Human Technical Decision:** Replaced with PostgreSQL atomic key claim:
   `INSERT INTO actions ... ON CONFLICT (idempotency_key) DO NOTHING` paired with `FOR UPDATE` row locking. Exception handling strictly maps `psycopg.Error` to a clean HTTP 503 without leaking database internals, and connection cleanup is guaranteed in a `finally` block.
-- **Evidence Documentation:** Full analysis against User Impact, Maintenance, and Operating Cost, along with explicit provenance notes, is captured in [`docs/AI_REVIEW_EVIDENCE.md`](docs/AI_REVIEW_EVIDENCE.md).
+- **Evidence Documentation & Provenance:** Full analysis across User Impact, Maintenance, and Operating Cost, explicit provenance disclosure, and instructions for genuine session transcripts are documented in [`docs/AI_REVIEW_EVIDENCE.md`](docs/AI_REVIEW_EVIDENCE.md).
 
 ---
 

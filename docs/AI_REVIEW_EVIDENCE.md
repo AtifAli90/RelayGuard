@@ -75,23 +75,27 @@ def execute_action(request: ActionRequest) -> dict[str, object]:
   ```sql
   idempotency_key TEXT NOT NULL UNIQUE REFERENCES actions(idempotency_key)
   ```
-  The candidate inserts into `effects` at Step 2 *before* writing to `actions`. On any fresh key, PostgreSQL raises `ForeignKeyViolation` immediately — `Key (idempotency_key)=(...) is not present in table "actions"`. The candidate's broad `except Exception as exc:` block catches this, rolls back the transaction, and re-raises it as `HTTPException(status_code=500, detail=str(exc))`, exposing the raw driver error to the caller. No effect is committed; the action simply fails with HTTP 500 on every first attempt. The service is broken for all new keys.
-- **Defect B: Check-Then-Act Concurrency Race — Applicable Only Without Foreign-Key Enforcement.**
-  If the FK constraint were absent and the insertion order were corrected (actions before effects), the check-then-act pattern would introduce a concurrency race window. Two concurrent requests sharing the same idempotency key could both execute the initial `SELECT` and both observe "no existing row". Both would then proceed past the check and attempt inserts. In that scenario, the second thread's `INSERT INTO actions` would fail with a `UniqueViolation`; the explicit `connection.rollback()` in the except block would roll back that thread's transaction. The first thread's effects row, however, would already have been committed — leaving one committed effect. Under higher concurrency or different connection-pool behavior, additional committed effects before the rollback would also be possible. The point is that the race window — not the FK path — is where committed duplicates could arise, and only in a schema without FK protection.
-- **Verdict:** **UNACCEPTABLE.** With the actual RelayGuard schema, every fresh request fails immediately with HTTP 500 due to the FK violation. Removing the FK to "fix" that would expose the concurrency race. Either way, the candidate cannot safely serve traffic.
+  The candidate inserts into `effects` at Step 2 *before* writing to `actions`. On every fresh key, PostgreSQL raises `ForeignKeyViolation` immediately — `Key (idempotency_key)=(...) is not present in table "actions"`. The candidate's broad `except Exception as exc:` block catches this, rolls back the transaction, and re-raises it as `HTTPException(status_code=500, detail=str(exc))`, exposing the raw driver error to the caller. No effect row is ever committed; the action fails with HTTP 500 on every first attempt. The service is broken for all new keys.
+- **Defect B: Concurrency Failure Mode & Schema / Transaction Realities.**
+  We must be technically precise about what happens under concurrency:
+  1. *Database Effects Are Not Committed as Duplicates:* Both `effects` and `actions` inserts take place within a single transaction where `connection.commit()` occurs only at the very end. If an exception occurs at any point, `connection.rollback()` is executed. Furthermore, `effects.idempotency_key` is constrained as `UNIQUE`. If two concurrent requests execute the candidate's initial `SELECT` simultaneously and both see no existing row, both may attempt `INSERT INTO effects`. However, the second thread will immediately trigger a `UniqueViolation` (or `ForeignKeyViolation`), and its `except` block will call `connection.rollback()`. Therefore, **this exact candidate implementation does not leave multiple committed database effects**.
+  2. *Contract Violation (500 Error vs. Cached 200 Replay):* While duplicate database rows are prevented by PostgreSQL's constraints and transaction rollback, the concurrent caller receives an unhandled HTTP 500 error instead of a graceful cached response (`status: completed, replayed: true`). The replay-protection contract is violated.
+  3. *Hypothetical Non-Database Side Effects:* If the action involved external, non-database side effects (e.g. sending an email, dispatching a webhook, or charging a credit card) executed *prior* to database commit, those external actions could not be rolled back by `connection.rollback()`. That represents the real-world operational hazard of check-then-act patterns when interacting with external systems.
+- **Verdict:** **UNACCEPTABLE.** With RelayGuard's schema, every fresh request fails with HTTP 500 due to the FK ordering. Under concurrency, replays crash rather than deduplicating. The candidate cannot serve production traffic safely.
 
 ### Dimension 2: Maintenance Effort & Debuggability
 - **Flaws:**
-  1. **Broad Exception Swallowing & Secret Leakage:** `except Exception as exc:` catches all errors and reflects `str(exc)` directly into the HTTP 500 response. This risks exposing database credentials, connection parameters, table names, and internal driver stack traces to callers.
+  1. **Broad Exception Reflection & Credential Exposure:** `except Exception as exc:` catches all errors and reflects `str(exc)` directly into the HTTP 500 response. This leaks database credentials, connection parameters, table names, and internal driver stack traces to callers.
   2. **Inverted Dependency Order:** Persisting side effects before the controlling action record violates relational integrity and makes transaction rollback tracing error-prone.
-  3. **Lack of Deterministic Connection Cleanup:** Relies on manual commit/rollback without guaranteed resource closure (`finally: connection.close()`), leading to connection leaks under load.
-- **Verdict:** **HIGH REWORK COST.** Diagnosing intermittent concurrency failures and database leaks in production would impose severe engineering overhead.
+  3. **Lack of Deterministic Connection Cleanup:** Calls `connect()` without ensuring closure in a `finally: connection.close()` block, leading to connection exhaustion under sustained traffic.
+- **Verdict:** **HIGH REWORK COST.** Diagnosing intermittent concurrency failures, connection leaks, and security disclosure in production would impose severe engineering overhead.
 
 ### Dimension 3: Operating-Cost Exposure
-- **Downstream Waste & Risk:**
-  - Duplicate effects generate unnecessary writes, storage bloat, and database lock contention.
-  - *Empirical Note:* We distinguish theoretical concurrency vulnerability from measured benchmarks. In an unconstrained baseline without deduplication, duplicate rate is 100% (100 effects for 100 replays). Under this candidate's check-then-act logic, the duplicate leakage rate is non-deterministic and depends on thread interleaving, network latency, and connection pool sizing.
-- **Verdict:** **UNCONTROLLED EXPENSE.** Any window permitting duplicate side effects risks compounding costs in downstream systems.
+- **Operational Hazards:**
+  - *Service Availability:* Constant HTTP 500 errors on fresh actions halt agent execution pipelines and trigger cascading retry storms across upstream callers.
+  - *Connection Pool Saturation:* Leaked database connections rapidly exhaust PostgreSQL server `max_connections`, degrading overall cluster performance.
+  - *Distinction Between Database & External Effects:* We explicitly distinguish verified local database behavior from external side-effect risks. In our unconstrained baseline, 100 replays yield 100 committed effects. In this candidate, database uniqueness constraints prevent duplicate commits by rolling back with HTTP 500 errors. In an external systems context, non-transactional actions would produce unrecoverable duplicate costs.
+- **Verdict:** **UNCONTROLLED EXPENSE.** Service outages, connection leaks, and upstream retry storms create compounding operational costs.
 
 ---
 
@@ -131,3 +135,18 @@ The corrected implementation was verified using real PostgreSQL execution:
   - **Effects Created:** Exactly **1** effect in PostgreSQL.
   - **HTTP Status:** All 10 requests returned HTTP 200 (1 fresh execution, 9 cached replays). Zero collisions or 500 errors.
 - **Fault Atomicity Test (`test_database_failure_atomicity_and_recovery`):** Injected database trigger aborting effect creation rolled back the entire transaction, leaving 0 action and 0 effect rows, allowing seamless retry recovery.
+
+---
+
+## 6. Provenance Disclosure & Guidance for Genuine Session Evidence
+
+### Provenance Disclosure:
+The code excerpt presented in Section 2 is an **illustrative review archetype** constructed to evaluate the ubiquitous check-then-act anti-pattern (`SELECT ... if not found INSERT ...`). It captures real design vulnerabilities (FK constraint ordering, unhandled exception disclosure, lack of connection cleanup) for rigorous technical analysis. It is **not** an unedited raw transcript from an AI coding agent session, and no artificial session IDs, timestamps, or prompt histories are fabricated.
+
+### Candidate Guidance — How to Include Genuine Session Evidence:
+If you have an unedited session excerpt from an AI coding assistant (e.g. Claude, Gemini, ChatGPT, Cursor, or GitHub Copilot) generated during your Quest implementation:
+1. Replace the prompt archetype in Section 2 with your **exact prompt**.
+2. Replace the candidate code in Section 2 with the **literal, unedited AI output**.
+3. Record the AI model name and session date/time.
+4. Keep the human review structure in Sections 3 and 4, tailoring the specific technical critique to the flaws present in your actual candidate output.
+5. If no live session transcript was captured, retain this explicit archetype disclosure. Honest labeling of reconstructed examples is mandatory under Quest integrity rules.
