@@ -91,6 +91,20 @@ python -m scripts.measure
 
 Sends 100 identical requests to the defective baseline and 100 to the fixed implementation, reporting effect counts, prevented duplicates (99), and local wall-clock timings.
 
+### Step 5: Run Live Presentation & Demonstration
+
+To execute a live end-to-end demonstration covering health checks, replay deduplication, conflict rejection, 10-thread parallel race testing, and baseline contrast:
+
+**Windows PowerShell:**
+```powershell
+.\run_presentation.ps1
+```
+
+**Any Platform:**
+```bash
+python -m scripts.demo_live
+```
+
 ---
 
 ## 3. Running the Local API
