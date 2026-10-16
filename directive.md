@@ -87,7 +87,10 @@ Every proposal and change is evaluated against these four non-negotiable signals
 - [x] Invalid content and unexpected fields return HTTP 422 Unprocessable Entity.
 - [x] Concurrency test verifies 10 simultaneous threads yield exactly 1 effect in PostgreSQL.
 - [x] Database-level fault injection verifies transactional rollback atomicity.
-- [x] Automated test suite passes cleanly against PostgreSQL (`8 passed in 4.93s`).
+- [x] Health probe (`GET /healthz`) verified connected and returns HTTP 200.
+- [x] Unavailable database returns HTTP 503 without leaking credentials or connection strings.
+- [x] Connection URL credential-masking helper verified by automated test.
+- [x] Automated test suite passes cleanly against PostgreSQL — **10 passed** (full output in [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md)).
 - [x] Focused diff containing only justified changes and clean architecture.
 - [x] ADR-001 compares 4 storage alternatives with trade-offs.
 - [x] Real AI review candidate analyzed against the 3 quality dimensions.
@@ -117,61 +120,34 @@ uvicorn app.main:app --reload
 
 ---
 
-## 9. Empirical Verification Evidence (Captured Outputs)
+## 9. Empirical Verification Evidence
 
-### Automated Test Suite:
+Full console output for every command is preserved in [docs/TEST_REPORT.md](docs/TEST_REPORT.md). A concise summary is reproduced here.
+
+### Automated Test Suite (10 tests, all passing):
+
 ```text
 python -m pytest -v
-============================= test session starts =============================
-platform win32 -- Python 3.14.3, pytest-9.0.3, pluggy-1.6.0 -- C:\Python314\python.exe
-cachedir: .pytest_cache
-rootdir: D:\Projects\RelayGuard
-plugins: anyio-4.13.0, langsmith-0.9.2
-collecting ... collected 8 items
-
-tests/test_replay_protection.py::test_baseline_reproduces_duplicate_effects PASSED [ 12%]
-tests/test_replay_protection.py::test_exact_replays_create_one_effect_and_return_cached_result PASSED [ 25%]
-tests/test_replay_protection.py::test_reusing_key_with_different_payload_is_rejected PASSED [ 37%]
-tests/test_replay_protection.py::test_invalid_requests_are_rejected_and_create_no_effects PASSED [ 50%]
-tests/test_replay_protection.py::test_concurrent_replays_create_one_effect PASSED [ 62%]
-tests/test_replay_protection.py::test_database_failure_atomicity_and_recovery PASSED [ 75%]
-tests/test_replay_protection.py::test_healthz_endpoint PASSED            [ 87%]
-tests/test_replay_protection.py::test_repeatability_with_multiple_actions PASSED [100%]
-
-======================== 8 passed, 1 warning in 4.93s =========================
+...
+10 passed, 1 warning in 19.45s
 ```
 
-### 100-Request PostgreSQL Measurement:
-```text
-python -m scripts.measure
-========================================================================
-                RELAYGUARD POSTGRESQL LOCAL MEASUREMENT
-========================================================================
-Environment context:
-  OS:              Windows 11 (AMD64)
-  Python:          3.14.3
-  Database engine: PostgreSQL (PostgreSQL 18.3 on x86_64-windows)
-  Measurement ID:  1b644a01
-------------------------------------------------------------------------
-Case: baseline-intentionally-defective
-  Idempotency Key:     measure-base-1b644a01
-  Requests Attempted:  100
-  HTTP 200 Responses:  100
-  Effects Created:     100
-  Elapsed Time (ms):   5526.834
-  Avg ms/request:      55.268
-------------------------------------------------------------------------
-Case: fixed-idempotency-guard
-  Idempotency Key:     measure-fixed-1b644a01
-  Requests Attempted:  100
-  HTTP 200 Responses:  100
-  Effects Created:     1
-  Elapsed Time (ms):   6138.108
-  Avg ms/request:      61.381
-------------------------------------------------------------------------
-Duplicate effects prevented in this run: 99
-========================================================================
-```
+Tests cover: baseline defect reproduction, exact replay deduplication, payload conflict (HTTP 409), input validation (HTTP 422), 10-thread concurrency safety, database fault-injection atomicity, health probe, multi-key repeatability, database-unavailability HTTP 503, and credential-masking verification.
+
+### 100-Request PostgreSQL Measurement (Measurement ID `d644137c`):
+
+> **Note:** Elapsed wall-clock times are local, environment-specific figures. They are not a production benchmark. The primary correctness metric is effect count.
+
+| Metric | Defective Baseline | Fixed RelayGuard |
+|---|---:|---:|
+| Requests attempted | 100 | 100 |
+| HTTP 200 responses | 100 | 100 |
+| **Effects created in PostgreSQL** | **100** | **1** |
+| Elapsed (ms, local) | 4,057.922 | 4,183.196 |
+| Avg ms/request (local) | 40.579 | 41.832 |
+
+**Duplicate effects prevented: 99.**
+The fixed path required marginally more time (~1.25 ms/request) for atomic key-claim overhead. No latency improvement is claimed.
 
 ---
 

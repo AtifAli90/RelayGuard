@@ -25,7 +25,7 @@
 - **Narration:**
   > "Let's reproduce the defect live. Our measurement script sends 100 identical requests to both our defective baseline and our fixed implementation against PostgreSQL.
   > Notice the result: The baseline created 100 separate synthetic effects in the database—one for every single delivery.
-  > The fixed implementation created exactly 1 effect, preventing 99 duplicate side effects. Notice also that the fixed path took slightly longer—6.1 seconds versus 5.5 seconds—so we claim correctness, not false speed gains."
+  > The fixed implementation created exactly 1 effect, preventing 99 duplicate side effects. Wall-clock times vary by environment; the primary metric is effect count, not speed."
 
 ### 1:25 – 2:10: Architecture & Focused Diff
 - **On Screen:** `git diff` or `app/main.py` showing `execute_action`
@@ -38,7 +38,7 @@
 ### 2:10 – 3:15: Verification Suite (Concurrency & Fault Atomicity)
 - **On Screen:** Terminal running `python -m pytest -v`
 - **Narration:**
-  > "Let's run our test suite: `python -m pytest -v`. All 8 tests pass against real PostgreSQL.
+  > "Let's run our test suite: `python -m pytest -v`. All 10 tests pass against real PostgreSQL.
   > Two critical tests to highlight:
   > First, `test_concurrent_replays_create_one_effect`: 10 parallel threads hit the API simultaneously with the same key. Exactly 1 effect is created, with 0 race condition errors.
   > Second, `test_database_failure_atomicity_and_recovery`: We inject a PostgreSQL trigger that forces an exception on effect insertion. The entire transaction rolls back cleanly—leaving neither action nor effect rows in the database. When the fault is cleared, the retry succeeds cleanly."

@@ -9,6 +9,8 @@ Covers:
 6. Transactional failure atomicity (PostgreSQL trigger fault injection & recovery)
 7. Operational health endpoint verification (GET /healthz)
 8. End-to-end repeatability and database state assertion
+9. Database unavailability returns HTTP 503 without leaking credentials
+10. Connection URL credential redaction (mask_database_url helper)
 """
 from __future__ import annotations
 

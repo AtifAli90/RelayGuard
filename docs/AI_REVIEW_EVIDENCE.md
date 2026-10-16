@@ -70,20 +70,15 @@ def execute_action(request: ActionRequest) -> dict[str, object]:
 ## 3. Engineering Evaluation Against the Quality Rubric
 
 ### Dimension 1: User Impact (Correctness, Safety & Schema Integrity)
-- **Defect A: Immediate Foreign-Key Schema Violation.**
-  In RelayGuard's PostgreSQL schema (`app/storage.py`), the `effects` table defines a strict foreign key:
+- **Defect A: Immediate Foreign-Key Schema Violation — All Fresh Requests Fail.**
+  In RelayGuard's PostgreSQL schema (`app/storage.py`), the `effects` table carries a strict foreign key:
   ```sql
   idempotency_key TEXT NOT NULL UNIQUE REFERENCES actions(idempotency_key)
   ```
-  The candidate attempts to insert into `effects` at Step 2 *before* any corresponding record exists in `actions`. In PostgreSQL, this immediately triggers a `ForeignKeyViolation` (`psycopg.errors.ForeignKeyViolation: Key (idempotency_key)=(...) is not present in table "actions"`).
-  **Impact:** Fresh actions would fail immediately with HTTP 500 on their first attempt, breaking the service completely.
-- **Defect B: Theoretical Check-Then-Act Concurrency Race.**
-  Even if insertion order were inverted or foreign keys omitted, the naive check-then-act pattern (`SELECT` followed by `INSERT`) contains an unprotected race window. If two concurrent agent workers submit requests with the same idempotency key simultaneously:
-  1. Both transactions execute Step 1 (`SELECT`) concurrently.
-  2. Both see no existing row.
-  3. Both proceed to execute Step 2, creating duplicate side effects.
-  4. When the second transaction reaches `actions`, it triggers a `UniqueViolation` and returns HTTP 500, leaving the caller believing the action failed when a side effect was already committed.
-- **Verdict:** **UNACCEPTABLE.** Causes immediate schema violations on fresh keys and race-condition data corruption under concurrency.
+  The candidate inserts into `effects` at Step 2 *before* writing to `actions`. On any fresh key, PostgreSQL raises `ForeignKeyViolation` immediately — `Key (idempotency_key)=(...) is not present in table "actions"`. The candidate's broad `except Exception as exc:` block catches this, rolls back the transaction, and re-raises it as `HTTPException(status_code=500, detail=str(exc))`, exposing the raw driver error to the caller. No effect is committed; the action simply fails with HTTP 500 on every first attempt. The service is broken for all new keys.
+- **Defect B: Check-Then-Act Concurrency Race — Applicable Only Without Foreign-Key Enforcement.**
+  If the FK constraint were absent and the insertion order were corrected (actions before effects), the check-then-act pattern would introduce a concurrency race window. Two concurrent requests sharing the same idempotency key could both execute the initial `SELECT` and both observe "no existing row". Both would then proceed past the check and attempt inserts. In that scenario, the second thread's `INSERT INTO actions` would fail with a `UniqueViolation`; the explicit `connection.rollback()` in the except block would roll back that thread's transaction. The first thread's effects row, however, would already have been committed — leaving one committed effect. Under higher concurrency or different connection-pool behavior, additional committed effects before the rollback would also be possible. The point is that the race window — not the FK path — is where committed duplicates could arise, and only in a schema without FK protection.
+- **Verdict:** **UNACCEPTABLE.** With the actual RelayGuard schema, every fresh request fails immediately with HTTP 500 due to the FK violation. Removing the FK to "fix" that would expose the concurrency race. Either way, the candidate cannot safely serve traffic.
 
 ### Dimension 2: Maintenance Effort & Debuggability
 - **Flaws:**
