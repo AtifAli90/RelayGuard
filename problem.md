@@ -23,20 +23,21 @@ Autonomous AI agents and LLM orchestration layers frequently retry tool calls wh
 
 ## 3. Empirical Verification Evidence (PostgreSQL)
 
-The automated test suite (`python -m pytest -v`) confirms **8 passed** scenarios on PostgreSQL. The reproducible measurement script (`python -m scripts.measure`) evaluated 100 repeated deliveries per implementation against PostgreSQL:
+The automated test suite (`python -m pytest -v`) confirms **10 passed** scenarios on PostgreSQL (full log in [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md)). The reproducible measurement script (`python -m scripts.measure`, Measurement ID `d644137c`) evaluated 100 repeated deliveries per implementation against PostgreSQL:
 
 | Measure | Intentionally Defective Baseline | Replay-Safe Implementation |
 |---|---:|---:|
+| Measurement ID | `measure-base-d644137c` | `measure-fixed-d644137c` |
 | Database Engine | PostgreSQL 18.3 / PostgreSQL 16 (Docker) | PostgreSQL 18.3 / PostgreSQL 16 (Docker) |
 | Requests Attempted | 100 | 100 |
 | HTTP 200 Responses | 100 | 100 |
 | Synthetic Effects Created | **100** | **1** |
-| Local Elapsed Time | 5,526.834 ms | 6,138.108 ms |
-| Average ms / request | 55.268 ms | 61.381 ms |
+| Local Elapsed Time | 4,057.922 ms | 4,183.196 ms |
+| Average ms / request | 40.579 ms | 41.832 ms |
 | **Duplicate Effects Prevented** | — | **99** |
 
 ### Interpretation:
-In this PostgreSQL run, the replay-safe implementation prevented **99 duplicate synthetic effects**. The fixed version required ~6 ms of additional overhead per request due to payload canonicalization, transaction synchronization, and uniqueness index lookups. **No latency improvement is claimed.** The primary success metric is duplicate effect prevention (1 effect per logical action).
+In this PostgreSQL run, the replay-safe implementation prevented **99 duplicate synthetic effects**. The fixed version required ~1.25 ms of additional overhead per request due to payload canonicalization, transaction synchronization, and uniqueness index lookups. Elapsed wall-clock times are local, environment-specific figures, not a production benchmark. **No latency improvement is claimed.** The primary success metric is duplicate effect prevention (1 effect per logical action).
 
 ---
 

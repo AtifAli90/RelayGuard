@@ -56,7 +56,7 @@ No external network calls, payments, or third-party APIs are contacted. This is 
 
 ### Step 1: Configure Environment Variables
 
-Create your local `.env` file from the provided development template:
+Create your local `.env` file from the provided development template before starting the database container:
 
 **Windows PowerShell:**
 ```powershell
@@ -68,7 +68,9 @@ Copy-Item .env.example .env
 cp .env.example .env
 ```
 
-> [!NOTE]
+> [!IMPORTANT]
+> **Clean-Clone Verification:** In a clean clone with no undeclared `DATABASE_URL` environment variable already set in your shell session, copying `.env.example` to `.env` ensures that `app.config` resolves the database host port correctly without requiring manual variable exports. If `DATABASE_URL` is completely absent, `app.config` fails fast with an explicit error directing you to `.env.example`.
+>
 > The default `.env` sets `DATABASE_URL=postgresql://relayguard:relayguard_dev_password@localhost:5434/relayguard`, matching Docker Compose host port **5434** (which avoids collisions with any native PostgreSQL running on port 5432). If you use a native PostgreSQL service on port 5432, update `DATABASE_URL` in `.env` to point to port 5432.
 
 ### Step 2: Start PostgreSQL via Docker Compose

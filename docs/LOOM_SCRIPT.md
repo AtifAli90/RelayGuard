@@ -46,13 +46,13 @@
 ### 3:15 – 4:10: AI Code Review & Human Correction
 - **On Screen:** `docs/AI_REVIEW_EVIDENCE.md`
 - **Narration:**
-  > "During this project, we evaluated an AI-generated proposal shown here in `docs/AI_REVIEW_EVIDENCE.md`.
-  > The AI suggested a `SELECT` check followed by an `INSERT`.
+  > "During this project, we evaluated a reconstructed AI proposal archetype shown here in `docs/AI_REVIEW_EVIDENCE.md`.
+  > The archetype attempts a naive `SELECT` check followed by an `INSERT`.
   > As lead engineer, I rejected that candidate across all three quality dimensions:
-  > In User Impact: two concurrent agent retries would both see 'key not found' and execute duplicate effects, defeating our mission.
-  > In Maintenance: it swallowed errors and leaked raw SQL.
-  > In Operating Cost: duplicate effects leaked into downstream writes.
-  > I replaced it with the atomic `ON CONFLICT` pattern and strict exception masking."
+  > In User Impact: the code inserts into `effects` before `actions`, immediately triggering a foreign-key violation on every new request, breaking the service on all fresh keys. Even if the ordering were reversed, check-then-act creates a race condition.
+  > In Maintenance: it caught broad exceptions, leaked raw database error strings to callers, and failed to guarantee connection cleanup.
+  > In Operating Cost: broken requests and race conditions risk operational overhead.
+  > I replaced it with PostgreSQL's atomic `ON CONFLICT` pattern, `FOR UPDATE` locking, and strict exception masking."
 
 ### 4:10 – 4:45: Handoff & Production Boundaries
 - **On Screen:** `HANDOFF.md` or `directive.md` (Handoff section)

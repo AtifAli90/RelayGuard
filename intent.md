@@ -51,20 +51,21 @@ $$\text{Priority Score} = (\text{User Impact} \times 0.50) + (\text{Maintenance 
 
 ## 4. Empirical Baseline vs. Fixed Evidence (PostgreSQL)
 
-Measurements were executed on the final revision using `python -m scripts.measure` against PostgreSQL 18:
+Measurements were executed on the final revision using `python -m scripts.measure` against PostgreSQL (Measurement ID `d644137c`, recorded in [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md)):
 
 | Metric | Defective Baseline | Replay-Safe Gateway |
 |---|---:|---:|
-| Database Engine | PostgreSQL 18.3 | PostgreSQL 18.3 |
+| Measurement ID | `measure-base-d644137c` | `measure-fixed-d644137c` |
+| Database Engine | PostgreSQL (PostgreSQL 18.3 / Docker 16) | PostgreSQL (PostgreSQL 18.3 / Docker 16) |
 | Requests Attempted | 100 | 100 |
 | Successful HTTP 200 Responses | 100 | 100 |
 | **Synthetic Effects Created** | **100** | **1** |
-| Local Elapsed Time | 5,526.834 ms | 6,138.108 ms |
-| Average Latency / Request | 55.268 ms | 61.381 ms |
+| Local Elapsed Time | 4,057.922 ms | 4,183.196 ms |
+| Average Latency / Request | 40.579 ms | 41.832 ms |
 | **Duplicate Effects Prevented** | — | **99** |
 
 ### Integrity Note on Latency:
-The fixed path required ~6 ms of additional overhead per request due to SHA-256 payload hashing, transaction synchronization, and uniqueness index lookups. **We do not claim a speed improvement.** The verified value is 100% correctness (1 effect per logical action).
+The fixed path required marginally more time (~1.25 ms/request) for SHA-256 payload hashing, transaction synchronization, and uniqueness index lookups. Elapsed wall-clock times are local, environment-specific figures. **We do not claim a speed improvement.** The verified value is 100% correctness (1 effect per logical action).
 
 ---
 
@@ -89,10 +90,10 @@ The fixed path required ~6 ms of additional overhead per request due to SHA-256 
 - [x] Malformed requests and extra fields return HTTP 422.
 - [x] Concurrency safety: 10 simultaneous threads produce exactly 1 effect.
 - [x] Failure atomicity: database-level fault injection verifies total rollback.
-- [x] Automated tests pass on final revision (`8 passed in 4.93s`).
+- [x] Automated tests pass on final revision (10 passed, 1 warning in 18.27s; see [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md)).
 - [x] Focused diff with zero unrelated refactors or dependency bloat.
 - [x] ADR-001 evaluates 4 alternatives with clear trade-offs.
-- [x] Real AI review candidate analyzed against the 3 quality dimensions.
+- [x] Reconstructed AI review archetype analyzed against the 3 quality dimensions.
 - [x] Engineering handoff guide (`HANDOFF.md`) complete with next-engineer exercise.
 - [ ] Loom video recorded by candidate ($\le$ 5 minutes).
 
