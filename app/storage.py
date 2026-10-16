@@ -20,7 +20,8 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 def initialize(db_path: str | Path) -> None:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with connect(path) as connection:
+    connection = connect(path)
+    try:
         connection.execute("PRAGMA journal_mode = WAL")
         connection.executescript(
             """
@@ -41,3 +42,5 @@ def initialize(db_path: str | Path) -> None:
             );
             """
         )
+    finally:
+        connection.close()

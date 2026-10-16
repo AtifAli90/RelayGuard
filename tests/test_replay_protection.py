@@ -77,3 +77,46 @@ def test_concurrent_replays_create_one_effect(tmp_path):
     assert _fixed_effect_count(db_path) == 1
     assert sum(response.json()["replayed"] is False for response in responses) == 1
     assert sum(response.json()["replayed"] is True for response in responses) == 9
+
+
+def test_invalid_action_type_is_rejected(fixed_client):
+    """Unsupported action types must be rejected at the validation layer."""
+    invalid = {**SAME_ACTION, "action_type": "send_email"}
+    response = fixed_client.post("/v1/actions", json=invalid)
+    assert response.status_code == 422
+
+
+def test_invalid_idempotency_key_format_is_rejected(fixed_client):
+    """Keys with special characters or wrong length must be rejected."""
+    # Too short
+    short_key = {**SAME_ACTION, "idempotency_key": "abc"}
+    assert fixed_client.post("/v1/actions", json=short_key).status_code == 422
+
+    # Contains forbidden characters
+    bad_chars = {**SAME_ACTION, "idempotency_key": "key with spaces!!"}
+    assert fixed_client.post("/v1/actions", json=bad_chars).status_code == 422
+
+    # Too long (129 chars)
+    long_key = {**SAME_ACTION, "idempotency_key": "a" * 129}
+    assert fixed_client.post("/v1/actions", json=long_key).status_code == 422
+
+
+def test_extra_fields_are_rejected(fixed_client):
+    """Unexpected JSON fields must be rejected (extra='forbid')."""
+    extra = {**SAME_ACTION, "unexpected_field": "injected_value"}
+    response = fixed_client.post("/v1/actions", json=extra)
+    assert response.status_code == 422
+
+
+def test_empty_content_is_rejected(fixed_client):
+    """Empty string content must be rejected."""
+    empty = {**SAME_ACTION, "content": ""}
+    response = fixed_client.post("/v1/actions", json=empty)
+    assert response.status_code == 422
+
+
+def test_healthz_endpoint(fixed_client):
+    """Health check endpoint must return 200 with status ok."""
+    response = fixed_client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}

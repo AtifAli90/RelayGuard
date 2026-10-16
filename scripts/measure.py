@@ -1,6 +1,7 @@
 """Reproducible local before/after replay check; reports measured local values."""
 from __future__ import annotations
 
+import gc
 import sqlite3
 import tempfile
 import time
@@ -20,8 +21,12 @@ REPEATS = 100
 
 
 def count_rows(db_path: Path, table: str) -> int:
-    with sqlite3.connect(db_path) as connection:
-        return int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+    conn = sqlite3.connect(str(db_path), timeout=5.0)
+    try:
+        count = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+    finally:
+        conn.close()
+    return count
 
 
 def run_case(label: str, app, db_path: Path, table: str) -> dict[str, float | int | str]:
@@ -43,10 +48,11 @@ def run_case(label: str, app, db_path: Path, table: str) -> dict[str, float | in
 
 
 def main() -> None:
-    with tempfile.TemporaryDirectory(prefix="relayguard-measure-") as folder:
-        root = Path(folder)
-        baseline_db = root / "baseline.sqlite3"
-        fixed_db = root / "fixed.sqlite3"
+    tmp_dir = tempfile.mkdtemp(prefix="relayguard-measure-")
+    root = Path(tmp_dir)
+    baseline_db = root / "baseline.sqlite3"
+    fixed_db = root / "fixed.sqlite3"
+    try:
         baseline = run_case(
             "baseline-intentionally-defective",
             create_baseline_app(baseline_db), baseline_db, "baseline_effects",
@@ -63,6 +69,11 @@ def main() -> None:
         print("-" * 72)
         print(f"duplicate_effects_prevented_in_this_run: {baseline['effects_created'] - fixed['effects_created']}")
         print("Note: elapsed times are machine- and environment-specific; do not generalize them.")
+    finally:
+        # Force-close any lingering SQLite connections before cleanup (Windows)
+        gc.collect()
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

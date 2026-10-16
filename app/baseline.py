@@ -24,7 +24,8 @@ class BaselineRequest(BaseModel):
 def create_baseline_app(db_path: str | Path) -> FastAPI:
     app = FastAPI(title="RelayGuard baseline (intentionally defective)")
     app.state.db_path = Path(db_path)
-    with connect(app.state.db_path) as connection:
+    connection = connect(app.state.db_path)
+    try:
         connection.execute(
             """CREATE TABLE IF NOT EXISTS baseline_effects (
                 effect_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,20 +34,27 @@ def create_baseline_app(db_path: str | Path) -> FastAPI:
                 content TEXT NOT NULL
             )"""
         )
+        connection.commit()
+    finally:
+        connection.close()
 
     @app.post("/v1/actions")
     def execute_baseline(request: BaselineRequest) -> dict[str, object]:
         # DEFECT: every delivery creates a new effect, including replays.
-        with connect(app.state.db_path) as connection:
+        connection = connect(app.state.db_path)
+        try:
             cursor = connection.execute(
                 "INSERT INTO baseline_effects (idempotency_key, action_type, content) VALUES (?, ?, ?)",
                 (request.idempotency_key, request.action_type, request.content),
             )
+            connection.commit()
             return {
                 "action_id": request.idempotency_key,
                 "status": "completed",
                 "effect_id": cursor.lastrowid,
                 "replayed": False,
             }
+        finally:
+            connection.close()
 
     return app
