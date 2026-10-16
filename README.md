@@ -1,5 +1,14 @@
 # RelayGuard
 
+[![RelayGuard CI](https://github.com/AtifAli90/RelayGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/AtifAli90/RelayGuard/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-10%20passed-success?style=flat&logo=pytest&logoColor=white)](docs/TEST_REPORT.md)
+[![Deduplication](https://img.shields.io/badge/duplicates%20prevented-99%2F100-brightgreen?style=flat&logo=shield)](docs/TEST_REPORT.md)
+[![Database](https://img.shields.io/badge/database-PostgreSQL%2016%20%7C%2018-4169E1?style=flat&logo=postgresql&logoColor=white)](compose.yaml)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776AB?style=flat&logo=python&logoColor=white)](requirements.txt)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?style=flat&logo=fastapi&logoColor=white)](app/main.py)
+[![Driver](https://img.shields.io/badge/driver-Psycopg%203-336791?style=flat&logo=postgresql&logoColor=white)](app/storage.py)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+
 > **Replay-safe execution for a synthetic AI-agent tool action.**
 > Built with FastAPI, PostgreSQL 16, and Psycopg 3.
 
