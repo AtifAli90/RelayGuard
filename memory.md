@@ -122,4 +122,4 @@
 | 11 | AI code review candidate analyzed & rejected | ✅ PASSED | `docs/AI_REVIEW_EVIDENCE.md` |
 | 12 | Engineering handoff guide complete | ✅ PASSED | `HANDOFF.md` |
 | 13 | Loom video recorded ($\le$ 5 min) | 🔲 CANDIDATE ACTION | Script in `docs/LOOM_SCRIPT.md` |
-| 14 | External repository links verified | 🔲 CANDIDATE ACTION | Push to GitHub & verify |
+| 14 | External repository linked | ✅ PASSED | https://github.com/AtifAli90/RelayGuard |

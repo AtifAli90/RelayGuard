@@ -217,8 +217,8 @@ A complete architectural record evaluating 4 storage strategies is published at 
 
 ### Required Submission Links (Candidate Action Items)
 - **Loom Video ($\le$ 5 minutes):** `[PENDING — Candidate to record using docs/LOOM_SCRIPT.md and insert URL]`
-- **Repository URL:** `[PENDING — Push to public/private accessible GitHub repository and insert URL]`
-- **Focused Diff / Commit Link:** `[PENDING — Link to commit on GitHub]`
+- **Repository URL:** https://github.com/AtifAli90/RelayGuard
+- **Focused Diff / Commit Link:** https://github.com/AtifAli90/RelayGuard/commits/main
 - **Test Run Evidence:** Captured in [`docs/TEST_REPORT.md`](file:///d:/Projects/RelayGuard/docs/TEST_REPORT.md).
 - **Measurement Output:** Captured in Section 9 above.
 - **AI Review Evidence:** Captured in [`docs/AI_REVIEW_EVIDENCE.md`](file:///d:/Projects/RelayGuard/docs/AI_REVIEW_EVIDENCE.md).
