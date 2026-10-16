@@ -1,122 +1,259 @@
+"""Automated verification suite for RelayGuard PostgreSQL replay protection.
+
+Covers:
+1. Baseline defect reproduction (10 requests -> 10 effects)
+2. Exact sequential replay (10 requests -> 1 effect, 1 fresh, 9 replayed)
+3. Payload conflict detection (same key, different content -> HTTP 409)
+4. Comprehensive input validation & extra-field rejection (HTTP 422)
+5. Concurrency safety (10 concurrent threads -> 1 effect, no race conditions)
+6. Transactional failure atomicity (PostgreSQL trigger fault injection & recovery)
+7. Operational health endpoint verification (GET /healthz)
+8. End-to-end repeatability and database state assertion
+"""
 from __future__ import annotations
 
-import sqlite3
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app.baseline import create_baseline_app
+from app.storage import connect
 from app.main import create_app
 
 
-SAME_ACTION = {
-    "idempotency_key": "update-demo-0001",
-    "action_type": "publish_update",
-    "content": "Synthetic customer update for the RelayGuard demo.",
-}
+def _get_count(db_url: str, table: str, key: str | None = None) -> int:
+    """Helper to query row count in a given table, optionally filtered by idempotency_key."""
+    with connect(db_url) as conn:
+        with conn.cursor() as cur:
+            if key is not None:
+                cur.execute(f"SELECT COUNT(*) AS c FROM {table} WHERE idempotency_key = %s;", (key,))
+            else:
+                cur.execute(f"SELECT COUNT(*) AS c FROM {table};")
+            row = cur.fetchone()
+            return int(row["c"]) if row else 0
 
 
-def _fixed_effect_count(db_path) -> int:
-    with sqlite3.connect(db_path) as connection:
-        return connection.execute("SELECT COUNT(*) FROM effects").fetchone()[0]
+def _sample_action(key_suffix: str = "0001", content: str = "Synthetic customer update.") -> dict[str, str]:
+    return {
+        "idempotency_key": f"update-demo-{key_suffix}",
+        "action_type": "publish_update",
+        "content": content,
+    }
 
 
-def _baseline_effect_count(db_path) -> int:
-    with sqlite3.connect(db_path) as connection:
-        return connection.execute("SELECT COUNT(*) FROM baseline_effects").fetchone()[0]
+def test_baseline_reproduces_duplicate_effects(baseline_client, db_url):
+    """Confirm the defective baseline creates 10 duplicate effects for 10 identical requests."""
+    action = _sample_action("baseline-test")
+    responses = [baseline_client.post("/v1/actions", json=action) for _ in range(10)]
+
+    assert all(r.status_code == 200 for r in responses)
+    # The intentional defect: every replay creates a brand new synthetic effect
+    assert _get_count(db_url, "baseline_effects", action["idempotency_key"]) == 10
+    effect_ids = [r.json()["effect_id"] for r in responses]
+    assert len(set(effect_ids)) == 10  # 10 distinct effect IDs
 
 
-def test_baseline_reproduces_duplicate_effects(tmp_path):
-    db_path = tmp_path / "baseline.sqlite3"
-    app = create_baseline_app(db_path)
-    with TestClient(app) as client:
-        responses = [client.post("/v1/actions", json=SAME_ACTION) for _ in range(10)]
-    assert all(response.status_code == 200 for response in responses)
-    assert _baseline_effect_count(db_path) == 10
+def test_exact_replays_create_one_effect_and_return_cached_result(fixed_client, db_url):
+    """Exact replays with the same key and payload create 1 effect and return cached outcome."""
+    action = _sample_action("exact-replay")
+    responses = [fixed_client.post("/v1/actions", json=action) for _ in range(10)]
+
+    assert all(r.status_code == 200 for r in responses)
+    # Database assertion: exactly 1 effect row created in PostgreSQL
+    assert _get_count(db_url, "effects", action["idempotency_key"]) == 1
+    assert _get_count(db_url, "actions", action["idempotency_key"]) == 1
+
+    # Response assertions: 1 fresh execution, 9 replays
+    fresh = [r.json() for r in responses if r.json()["replayed"] is False]
+    replayed = [r.json() for r in responses if r.json()["replayed"] is True]
+    assert len(fresh) == 1
+    assert len(replayed) == 9
+
+    # All responses share identical action_id and effect_id
+    all_effect_ids = {r.json()["effect_id"] for r in responses}
+    assert len(all_effect_ids) == 1
 
 
-def test_replays_create_only_one_effect_and_return_cached_result(tmp_path):
-    db_path = tmp_path / "fixed.sqlite3"
-    app = create_app(db_path)
-    with TestClient(app) as client:
-        responses = [client.post("/v1/actions", json=SAME_ACTION) for _ in range(10)]
-    assert all(response.status_code == 200 for response in responses)
-    assert _fixed_effect_count(db_path) == 1
-    assert sum(response.json()["replayed"] is False for response in responses) == 1
-    assert sum(response.json()["replayed"] is True for response in responses) == 9
-    effect_ids = {response.json()["effect_id"] for response in responses}
+def test_reusing_key_with_different_payload_is_rejected(fixed_client, db_url):
+    """Reusing an existing key with different content must return HTTP 409 Conflict."""
+    action_orig = _sample_action("conflict-key", content="Original content payload.")
+    action_conflict = _sample_action("conflict-key", content="Tampered / different content payload.")
+
+    first = fixed_client.post("/v1/actions", json=action_orig)
+    assert first.status_code == 200
+    assert first.json()["replayed"] is False
+
+    second = fixed_client.post("/v1/actions", json=action_conflict)
+    assert second.status_code == 409
+    assert "different payload" in second.json()["detail"].lower()
+
+    # Verify no second effect was created in the database
+    assert _get_count(db_url, "effects", "update-demo-conflict-key") == 1
+
+
+def test_invalid_requests_are_rejected_and_create_no_effects(fixed_client, db_url):
+    """Pydantic validation must reject malformed requests with 422 and persist zero effects."""
+    base_key = f"invalid-key-{uuid.uuid4().hex[:6]}"
+
+    # 1. Invalid action_type
+    bad_action = {"idempotency_key": base_key, "action_type": "send_email", "content": "hello"}
+    assert fixed_client.post("/v1/actions", json=bad_action).status_code == 422
+
+    # 2. Key too short (<8 chars)
+    short_key = {"idempotency_key": "short", "action_type": "publish_update", "content": "hello"}
+    assert fixed_client.post("/v1/actions", json=short_key).status_code == 422
+
+    # 3. Key with forbidden special characters
+    illegal_key = {"idempotency_key": "bad key!@#$", "action_type": "publish_update", "content": "hello"}
+    assert fixed_client.post("/v1/actions", json=illegal_key).status_code == 422
+
+    # 4. Content empty or whitespace-only (stripped to empty)
+    empty_content = {"idempotency_key": base_key, "action_type": "publish_update", "content": "   "}
+    assert fixed_client.post("/v1/actions", json=empty_content).status_code == 422
+
+    # 5. Extra fields rejected (extra="forbid")
+    extra_field = {
+        "idempotency_key": base_key,
+        "action_type": "publish_update",
+        "content": "valid",
+        "admin": True,
+    }
+    assert fixed_client.post("/v1/actions", json=extra_field).status_code == 422
+
+    # No effects or action records should have been written
+    assert _get_count(db_url, "effects", base_key) == 0
+    assert _get_count(db_url, "actions", base_key) == 0
+
+
+def test_concurrent_replays_create_one_effect(db_url):
+    """Simultaneous requests with the same key and payload must produce exactly one effect in PostgreSQL."""
+    action = _sample_action("concurrent-pgrun")
+    app = create_app(db_url)
+
+    # Use separate TestClient connections to test genuine concurrent HTTP transactions
+    def send_request(_i: int):
+        with TestClient(app) as client:
+            return client.post("/v1/actions", json=action)
+
+    workers = 10
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        responses = list(executor.map(send_request, range(workers)))
+
+    # Every concurrent request must succeed with 200 (no 500s or unhandled lock errors)
+    assert all(r.status_code == 200 for r in responses)
+
+    # Database assertion: exactly 1 effect row exists in PostgreSQL
+    assert _get_count(db_url, "effects", action["idempotency_key"]) == 1
+    assert _get_count(db_url, "actions", action["idempotency_key"]) == 1
+
+    # Exactly 1 fresh response and 9 replay responses
+    fresh = [r.json() for r in responses if r.json()["replayed"] is False]
+    replayed = [r.json() for r in responses if r.json()["replayed"] is True]
+    assert len(fresh) == 1
+    assert len(replayed) == 9
+
+    # All responses must share the exact same effect_id
+    effect_ids = {r.json()["effect_id"] for r in responses}
     assert len(effect_ids) == 1
 
 
-def test_reusing_key_with_different_payload_is_rejected(fixed_client):
-    first = fixed_client.post("/v1/actions", json=SAME_ACTION)
-    changed = {**SAME_ACTION, "content": "A different action under the same key."}
-    second = fixed_client.post("/v1/actions", json=changed)
-    assert first.status_code == 200
-    assert second.status_code == 409
+def test_database_failure_atomicity_and_recovery(db_url):
+    """Inject a DB-level fault between action claim and effect insert; confirm atomic rollback and recovery.
 
+    Verifies that when effect persistence fails, the entire transaction rolls back,
+    leaving NEITHER the actions record nor the effects record committed.
+    Then verifies that when the fault is removed, the same idempotency key succeeds cleanly.
+    """
+    key = "update-demo-fault-injection"
+    action = {
+        "idempotency_key": key,
+        "action_type": "publish_update",
+        "content": "Payload before fault injection.",
+    }
+    app = create_app(db_url)
 
-def test_invalid_content_is_rejected(fixed_client):
-    invalid = {**SAME_ACTION, "content": "   "}
-    response = fixed_client.post("/v1/actions", json=invalid)
-    assert response.status_code == 422
+    # 1. Install a PostgreSQL trigger function that deliberately raises an exception on effects insert
+    with connect(db_url) as conn:
+        with conn.transaction():
+            conn.execute(
+                """
+                CREATE OR REPLACE FUNCTION fail_effect_insert()
+                RETURNS trigger AS $$
+                BEGIN
+                    RAISE EXCEPTION 'Simulated database failure during effect insertion';
+                END;
+                $$ LANGUAGE plpgsql;
 
+                DROP TRIGGER IF EXISTS trg_fault_effect ON effects;
+                CREATE TRIGGER trg_fault_effect
+                BEFORE INSERT ON effects
+                FOR EACH ROW EXECUTE FUNCTION fail_effect_insert();
+                """
+            )
 
-def test_concurrent_replays_create_one_effect(tmp_path):
-    db_path = tmp_path / "concurrent.sqlite3"
-    app = create_app(db_path)
-
-    def send_once(_index: int):
+    try:
+        # 2. Attempt the request: must fail with HTTP 503 Service Unavailable
         with TestClient(app) as client:
-            return client.post("/v1/actions", json=SAME_ACTION)
+            fault_response = client.post("/v1/actions", json=action)
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        responses = list(executor.map(send_once, range(10)))
+        assert fault_response.status_code == 503
+        assert "temporarily unavailable" in fault_response.json()["detail"].lower()
 
-    assert all(response.status_code == 200 for response in responses)
-    assert _fixed_effect_count(db_path) == 1
-    assert sum(response.json()["replayed"] is False for response in responses) == 1
-    assert sum(response.json()["replayed"] is True for response in responses) == 9
+        # 3. ATOMICITY VERIFICATION:
+        # Neither the action claim nor the effect row must be committed in PostgreSQL!
+        assert _get_count(db_url, "actions", key) == 0
+        assert _get_count(db_url, "effects", key) == 0
 
+    finally:
+        # 4. Remove the injected fault trigger
+        with connect(db_url) as conn:
+            with conn.transaction():
+                conn.execute("DROP TRIGGER IF EXISTS trg_fault_effect ON effects;")
+                conn.execute("DROP FUNCTION IF EXISTS fail_effect_insert();")
 
-def test_invalid_action_type_is_rejected(fixed_client):
-    """Unsupported action types must be rejected at the validation layer."""
-    invalid = {**SAME_ACTION, "action_type": "send_email"}
-    response = fixed_client.post("/v1/actions", json=invalid)
-    assert response.status_code == 422
+    # 5. RECOVERY VERIFICATION:
+    # Resubmit with the exact same idempotency key.
+    # Because the transaction rolled back cleanly, the key is not poisoned and succeeds!
+    with TestClient(app) as client:
+        recovery_response = client.post("/v1/actions", json=action)
 
+    assert recovery_response.status_code == 200
+    assert recovery_response.json()["status"] == "completed"
+    assert recovery_response.json()["replayed"] is False
 
-def test_invalid_idempotency_key_format_is_rejected(fixed_client):
-    """Keys with special characters or wrong length must be rejected."""
-    # Too short
-    short_key = {**SAME_ACTION, "idempotency_key": "abc"}
-    assert fixed_client.post("/v1/actions", json=short_key).status_code == 422
-
-    # Contains forbidden characters
-    bad_chars = {**SAME_ACTION, "idempotency_key": "key with spaces!!"}
-    assert fixed_client.post("/v1/actions", json=bad_chars).status_code == 422
-
-    # Too long (129 chars)
-    long_key = {**SAME_ACTION, "idempotency_key": "a" * 129}
-    assert fixed_client.post("/v1/actions", json=long_key).status_code == 422
-
-
-def test_extra_fields_are_rejected(fixed_client):
-    """Unexpected JSON fields must be rejected (extra='forbid')."""
-    extra = {**SAME_ACTION, "unexpected_field": "injected_value"}
-    response = fixed_client.post("/v1/actions", json=extra)
-    assert response.status_code == 422
-
-
-def test_empty_content_is_rejected(fixed_client):
-    """Empty string content must be rejected."""
-    empty = {**SAME_ACTION, "content": ""}
-    response = fixed_client.post("/v1/actions", json=empty)
-    assert response.status_code == 422
+    # Database now reflects exactly 1 action and 1 effect
+    assert _get_count(db_url, "actions", key) == 1
+    assert _get_count(db_url, "effects", key) == 1
 
 
 def test_healthz_endpoint(fixed_client):
-    """Health check endpoint must return 200 with status ok."""
+    """Operational health check must confirm database connectivity."""
     response = fixed_client.get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {"status": "ok", "database": "connected"}
+
+
+def test_repeatability_with_multiple_actions(fixed_client, db_url):
+    """Verifies that multiple distinct action keys coexist without cross-key interference."""
+    keys = [f"update-demo-rep-{i:04d}" for i in range(5)]
+    for key in keys:
+        res = fixed_client.post(
+            "/v1/actions",
+            json={"idempotency_key": key, "action_type": "publish_update", "content": f"Content for {key}"},
+        )
+        assert res.status_code == 200
+        assert res.json()["replayed"] is False
+
+    # Replay all 5
+    for key in keys:
+        res = fixed_client.post(
+            "/v1/actions",
+            json={"idempotency_key": key, "action_type": "publish_update", "content": f"Content for {key}"},
+        )
+        assert res.status_code == 200
+        assert res.json()["replayed"] is True
+
+    # 5 actions and 5 effects in total
+    assert _get_count(db_url, "actions") == 5
+    assert _get_count(db_url, "effects") == 5

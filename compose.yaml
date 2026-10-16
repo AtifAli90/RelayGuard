@@ -1,0 +1,24 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: relayguard-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-relayguard}
+      POSTGRES_USER: ${POSTGRES_USER:-relayguard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-relayguard_dev_password}
+    ports:
+      # Map to host port 5434 by default (or set POSTGRES_PORT in .env) to prevent
+      # conflicts with any pre-existing local PostgreSQL service on port 5432.
+      - "${POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-relayguard} -d ${POSTGRES_DB:-relayguard}"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:
+    name: relayguard_postgres_data

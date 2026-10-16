@@ -3,16 +3,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import sqlite3
-import tempfile
-from pathlib import Path
+import logging
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
+import psycopg
 
-from app.storage import connect, initialize
+from app.storage import connect, initialize_database
+
+logger = logging.getLogger("relayguard.api")
 
 
 class ActionRequest(BaseModel):
@@ -26,6 +26,11 @@ class ActionRequest(BaseModel):
 
 
 def _stable_payload_hash(request: ActionRequest) -> str:
+    """Compute a deterministic SHA-256 hash of the canonical request payload.
+
+    Excludes the idempotency key itself to test whether the same key is being
+    reused for identical vs conflicting payload contents.
+    """
     canonical = json.dumps(
         {"action_type": request.action_type, "content": request.content},
         sort_keys=True,
@@ -35,85 +40,132 @@ def _stable_payload_hash(request: ActionRequest) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def create_app(db_path: str | Path | None = None) -> FastAPI:
-    """Create an app, allowing tests to give each case an isolated database."""
-    if db_path is None:
-        configured = os.getenv("RELAYGUARD_DB_PATH")
-        if configured:
-            resolved_db_path = Path(configured)
-        else:
-            resolved_db_path = Path(tempfile.gettempdir()) / "relayguard-demo.sqlite3"
-    else:
-        resolved_db_path = Path(db_path)
-
-    initialize(resolved_db_path)
+def create_app(db_url: str | None = None) -> FastAPI:
+    """Application factory allowing tests and CLI to specify an isolated database URL."""
     application = FastAPI(
         title="RelayGuard",
-        description="A synthetic, replay-safe execution gateway for AI-agent tool calls.",
-        version="0.1.0",
+        description="A synthetic, replay-safe execution gateway for AI-agent tool calls using PostgreSQL.",
+        version="0.2.0",
     )
-    application.state.db_path = resolved_db_path
+    application.state.db_url = db_url
+
+    # Deterministic schema setup on startup
+    initialize_database(db_url)
 
     @application.get("/healthz", tags=["operations"])
     def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+        """Verify database connectivity and service health."""
+        try:
+            with connect(application.state.db_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1;")
+            return {"status": "ok", "database": "connected"}
+        except Exception as exc:
+            logger.error("Health check failed: %s", exc)
+            raise HTTPException(status_code=503, detail="Database health check failed.") from exc
 
     @application.post("/v1/actions", tags=["synthetic action"])
     def execute_action(request: ActionRequest) -> dict[str, object]:
+        """Execute or replay the synthetic publish_update action.
+
+        Guarantees atomicity and idempotency in a single PostgreSQL transaction:
+        1. Claims the idempotency key via INSERT ... ON CONFLICT DO NOTHING.
+        2. If key exists: verifies payload hash; returns cached result (409 on conflict).
+        3. If key is new: creates action ledger entry and synthetic effect row atomically.
+        """
         payload_hash = _stable_payload_hash(request)
-        connection = connect(application.state.db_path)
+        connection = connect(application.state.db_url)
+
         try:
-            # Reserve the write lock before checking for an existing key. This
-            # makes the check-and-create sequence serial within this SQLite DB.
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT payload_hash, result_json FROM actions WHERE idempotency_key = ?",
-                (request.idempotency_key,),
-            ).fetchone()
+            with connection.transaction():
+                # Step 1: Concurrency-safe atomic key claim.
+                # Avoids check-then-act race conditions under concurrent requests.
+                cur = connection.execute(
+                    """
+                    INSERT INTO actions (idempotency_key, payload_hash, result_json)
+                    VALUES (%s, %s, '{}'::jsonb)
+                    ON CONFLICT (idempotency_key) DO NOTHING;
+                    """,
+                    (request.idempotency_key, payload_hash),
+                )
 
-            if existing is not None:
-                if existing["payload_hash"] != payload_hash:
-                    connection.rollback()
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Idempotency key was already used with a different payload.",
-                    )
-                response = json.loads(existing["result_json"])
-                response["replayed"] = True
-                connection.commit()
-                return response
+                if cur.rowcount == 0:
+                    # Key was already claimed by a prior or concurrent transaction.
+                    # Lock row and inspect stored payload hash.
+                    existing = connection.execute(
+                        """
+                        SELECT payload_hash, result_json
+                        FROM actions
+                        WHERE idempotency_key = %s
+                        FOR UPDATE;
+                        """,
+                        (request.idempotency_key,),
+                    ).fetchone()
 
-            # This is a local synthetic effect. It deliberately has no network
-            # call, payment, email, or other real-world side effect.
-            connection.execute(
-                "INSERT INTO actions (idempotency_key, payload_hash, result_json) VALUES (?, ?, ?)",
-                (request.idempotency_key, payload_hash, "{}"),
-            )
-            cursor = connection.execute(
-                "INSERT INTO effects (idempotency_key, action_type, content) VALUES (?, ?, ?)",
-                (request.idempotency_key, request.action_type, request.content),
-            )
-            result = {
-                "action_id": request.idempotency_key,
-                "status": "completed",
-                "effect_id": cursor.lastrowid,
-                "replayed": False,
-            }
-            connection.execute(
-                "UPDATE actions SET result_json = ? WHERE idempotency_key = ?",
-                (json.dumps(result, sort_keys=True), request.idempotency_key),
-            )
-            connection.commit()
-            return result
+                    if existing is None:
+                        raise HTTPException(
+                            status_code=503,
+                            detail="Action ledger lock conflict; please retry.",
+                        )
+
+                    if existing["payload_hash"] != payload_hash:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Idempotency key was already used with a different payload.",
+                        )
+
+                    # Exact replay: return stored canonical outcome with replayed flag.
+                    response = dict(existing["result_json"])
+                    response["replayed"] = True
+                    return response
+
+                # Step 2: Key was successfully claimed. Insert synthetic effect.
+                # Notice: this is a local synthetic effect stored in PostgreSQL.
+                # It does not perform live network calls, payments, or emails.
+                cursor = connection.execute(
+                    """
+                    INSERT INTO effects (idempotency_key, action_type, content)
+                    VALUES (%s, %s, %s)
+                    RETURNING effect_id;
+                    """,
+                    (request.idempotency_key, request.action_type, request.content),
+                )
+                effect_row = cursor.fetchone()
+                if effect_row is None:
+                    raise HTTPException(status_code=503, detail="Failed to create synthetic effect.")
+
+                effect_id = effect_row["effect_id"]
+                result: dict[str, object] = {
+                    "action_id": request.idempotency_key,
+                    "status": "completed",
+                    "effect_id": effect_id,
+                    "replayed": False,
+                }
+
+                # Step 3: Record finalized outcome in ledger within the same transaction.
+                connection.execute(
+                    """
+                    UPDATE actions
+                    SET result_json = %s::jsonb
+                    WHERE idempotency_key = %s;
+                    """,
+                    (json.dumps(result, sort_keys=True), request.idempotency_key),
+                )
+                return result
+
         except HTTPException:
             raise
-        except sqlite3.Error as exc:
-            connection.rollback()
-            raise HTTPException(status_code=503, detail="Action ledger is temporarily unavailable.") from exc
+        except psycopg.Error as exc:
+            logger.error("Database transaction failed for key '%s': %s", request.idempotency_key, exc)
+            raise HTTPException(
+                status_code=503,
+                detail="Action ledger is temporarily unavailable.",
+            ) from exc
         finally:
             connection.close()
 
     return application
 
 
+# Default application instance using environment DATABASE_URL
 app = create_app()

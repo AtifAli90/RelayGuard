@@ -1,69 +1,149 @@
-# RelayGuard — Quest Starter Scaffold
+# RelayGuard — Replay-Safe Execution Gateway for AI-Agent Tool Calls
 
-RelayGuard is a small, synthetic FastAPI service demonstrating replay-safe handling for one AI-agent tool action. The project is designed to be small enough to understand and verify in a short engineering exercise.
+RelayGuard is a focused, production-aware FastAPI service demonstrating **replay-safe execution for AI-agent tool actions**. Built on **PostgreSQL** using atomic transactions, concurrency-safe uniqueness constraints, and deterministic payload hashing, RelayGuard prevents duplicate side effects when tool invocations are replayed following network drops or agent retry loops.
 
-> **Status:** starter scaffold prepared before the timed Quest begins. If you use it for the hiring exercise, disclose what pre-existed and document the changes you personally make during the Quest. Do not claim that this scaffold was created entirely during the timed period.
+> **Quest Status:** Initial starter scaffold originated as an illustrative SQLite prototype. During the timed engineering assessment, it was migrated end-to-end to PostgreSQL with Docker Compose, Psycopg 3, atomic concurrency handling, trigger-based fault injection testing, and empirical verification.
 
-## The one flow
+---
 
-`POST /v1/actions` receives a `publish_update` action with an `idempotency_key` and `content`. The baseline deliberately writes an effect for every request. The fixed implementation stores the action, payload hash, and synthetic effect atomically in SQLite. Repeating a key with an identical payload returns the stored result; reusing a key with a different payload returns HTTP 409.
+## 1. The Core Flow
 
-No external services are called. This is a local synthetic demonstration only.
+The service exposes `POST /v1/actions` for the synthetic `publish_update` action:
 
-## Setup
+```
+┌──────────────────────────────────────────────────────────┐
+│                   CALLER / AI AGENT                      │
+│  POST /v1/actions                                        │
+│  { idempotency_key, action_type, content }               │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│               RELAYGUARD FASTAPI GATEWAY                 │
+│  1. Pydantic v2 validation (extra="forbid")              │
+│  2. Compute canonical SHA-256 payload hash               │
+│  3. Single PostgreSQL transaction:                       │
+│     • Claim key via INSERT ... ON CONFLICT DO NOTHING    │
+│     • If claimed: inspect stored hash under FOR UPDATE   │
+│       - Matching: return cached result (replayed: true)  │
+│       - Conflict: HTTP 409 Conflict                      │
+│     • If new: execute synthetic effect & commit ledger   │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│                 POSTGRESQL STORAGE                       │
+│  • actions: idempotency_key (PK), payload_hash, result   │
+│  • effects: effect_id (PK), idempotency_key (UNIQUE, FK) │
+└──────────────────────────────────────────────────────────┘
+```
 
-Requires Python 3.11+ recommended.
+- **Baseline Implementation:** Intentionally defective. Writes a new synthetic effect to `baseline_effects` on every request, completely ignoring the key.
+- **Fixed Implementation:** Persists the action record and synthetic effect atomically in PostgreSQL. Returns stored results on exact replay; rejects key reuse with different content with **HTTP 409 Conflict**.
+
+No external network calls, payments, or third-party APIs are contacted. This is a local synthetic demonstration.
+
+---
+
+## 2. Quickstart & Setup
+
+### Prerequisites
+- Python 3.11+
+- Docker Desktop with Docker Compose (or local PostgreSQL 16+)
+
+### Step 1: Start PostgreSQL via Docker Compose
 
 ```bash
+docker compose up -d --wait db
+```
+
+The database container runs on port `5434` (mapped to internal `5432` to avoid host conflicts) with a health check.
+
+### Step 2: Install Python Dependencies
+
+**Windows PowerShell:**
+```powershell
 python -m venv .venv
-# Windows PowerShell:
 .\.venv\Scripts\Activate.ps1
-# macOS/Linux:
-# source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-## Verify
+**macOS / Linux:**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+### Step 3: Run Automated Verification Tests
 
 ```bash
-python -m pytest -q
+python -m pytest -v
+```
+
+Verifies 8 automated scenarios against real PostgreSQL, including exact replay, payload conflict, strict Pydantic rejection, 10-thread concurrent replay, and database trigger fault injection.
+
+### Step 4: Run Empirical 100-Request Measurement
+
+```bash
 python -m scripts.measure
 ```
 
-`measure.py` compares 100 repeated deliveries to the intentionally defective baseline and the fixed implementation. It reports the actual local values from that run. Execution-time values are local measurements, not service-level performance claims.
+Sends 100 identical requests to the defective baseline and 100 to the fixed implementation, reporting effect counts, prevented duplicates (99), and local wall-clock timings.
 
-## Run locally
+---
+
+## 3. Running the Local API
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-Open `http://127.0.0.1:8000/docs` to inspect the schema. The default demo database is written to the operating system temp folder. For isolated runs, set `RELAYGUARD_DB_PATH` to a path you control.
+Open interactive Swagger UI at: `http://127.0.0.1:8000/docs`
 
-Example request:
-
-```json
-{
-  "idempotency_key": "update-demo-0001",
-  "action_type": "publish_update",
-  "content": "Synthetic customer update for the RelayGuard demo."
-}
+### Sample Request:
+```bash
+curl -X POST http://127.0.0.1:8000/v1/actions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "idempotency_key": "update-demo-0001",
+    "action_type": "publish_update",
+    "content": "Synthetic customer update for the RelayGuard demo."
+  }'
 ```
 
-## Safety and scope
+- **First call:** `HTTP 200` $\rightarrow$ `{"status": "completed", "replayed": false, "effect_id": 1}`
+- **Exact repeat:** `HTTP 200` $\rightarrow$ `{"status": "completed", "replayed": true, "effect_id": 1}`
+- **Different content with same key:** `HTTP 409 Conflict` $\rightarrow$ `"Idempotency key was already used with a different payload."`
 
-- The baseline is intentionally defective and must never be used in production.
-- The service supports only one synthetic action type.
-- It does not connect to LLM providers, email services, payment providers, or production data.
-- The SQLite transaction protects the synthetic effect because both the effect and ledger are in the same database transaction. A real external side effect needs a suitable delivery design, commonly a transactional outbox and receiver-side idempotency.
-- The starter implementation is not a claim of multi-region, distributed exactly-once processing.
+---
 
-## Files
+## 4. Teardown and Reset
 
-- `problem.md`: optional context and problem framing.
-- `intent.md`: Quest problem selection, alternatives, criteria, non-goals, and evidence plan.
-- `directive.md`: working agent instructions plus results/handoff appendix. Update it with final repository links, your real AI session evidence, actual test output, and Loom link before submission.
-- `app/baseline.py`: clearly labelled defective baseline.
-- `app/main.py`: focused fixed service implementation.
-- `tests/test_replay_protection.py`: reproducible functional, validation, conflict, and concurrent replay checks.
-- `scripts/measure.py`: repeatable local before/after measurement.
+To stop the PostgreSQL container and reset data:
+```bash
+docker compose down -v
+```
+
+---
+
+## 5. Repository Structure
+
+| File / Folder | Purpose |
+|---|---|
+| [`compose.yaml`](file:///d:/Projects/RelayGuard/compose.yaml) | Docker Compose specification for development PostgreSQL 16 |
+| [`.env.example`](file:///d:/Projects/RelayGuard/.env.example) | Development-only environment template (no secrets committed) |
+| [`app/main.py`](file:///d:/Projects/RelayGuard/app/main.py) | Fixed replay-safe FastAPI service implementation |
+| [`app/baseline.py`](file:///d:/Projects/RelayGuard/app/baseline.py) | Clearly labelled, intentionally defective baseline service |
+| [`app/storage.py`](file:///d:/Projects/RelayGuard/app/storage.py) | Psycopg 3 PostgreSQL schema management & connection handling |
+| [`app/config.py`](file:///d:/Projects/RelayGuard/app/config.py) | Fail-fast environment configuration parser |
+| [`tests/test_replay_protection.py`](file:///d:/Projects/RelayGuard/tests/test_replay_protection.py) | Automated test suite (concurrency, atomicity, conflict, validation) |
+| [`scripts/measure.py`](file:///d:/Projects/RelayGuard/scripts/measure.py) | 100-request before/after measurement tool |
+| [`docs/ADR-001-idempotency-storage.md`](file:///d:/Projects/RelayGuard/docs/ADR-001-idempotency-storage.md) | Architecture Decision Record comparing 4 storage options |
+| [`docs/AI_REVIEW_EVIDENCE.md`](file:///d:/Projects/RelayGuard/docs/AI_REVIEW_EVIDENCE.md) | AI code review analysis evaluating check-then-act vulnerabilities |
+| [`docs/TEST_REPORT.md`](file:///d:/Projects/RelayGuard/docs/TEST_REPORT.md) | Full captured test outputs and benchmark evidence |
+| [`docs/LOOM_SCRIPT.md`](file:///d:/Projects/RelayGuard/docs/LOOM_SCRIPT.md) | 5-minute timed video script and shot list |
+| [`HANDOFF.md`](file:///d:/Projects/RelayGuard/HANDOFF.md) | Next-engineer onboarding guide and exercise |
+| [`problem.md`](file:///d:/Projects/RelayGuard/problem.md) | Problem brief and affected user analysis |
+| [`intent.md`](file:///d:/Projects/RelayGuard/intent.md) | Problem selection scoring rubric & non-goals |
+| [`directive.md`](file:///d:/Projects/RelayGuard/directive.md) | Working directive with acceptance criteria and results appendix |
