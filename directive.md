@@ -182,13 +182,13 @@ During this session, an AI proposal suggesting a naive check-then-act query patt
 - **Candidate Defect:** `SELECT` followed by `INSERT` creates a fatal concurrency window where concurrent agent retries both observe "key not found" and execute duplicate effects. Furthermore, raw database exceptions were exposed directly to API callers (`detail=str(exc)`).
 - **Human Technical Decision:** Replaced with PostgreSQL atomic key claim:
   `INSERT INTO actions ... ON CONFLICT (idempotency_key) DO NOTHING` paired with `FOR UPDATE` row locking. Exception handling strictly maps `psycopg.Error` to a clean HTTP 503 without leaking database internals.
-- **Evidence Documentation:** Full analysis against User Impact, Maintenance, and Operating Cost is captured in [`docs/AI_REVIEW_EVIDENCE.md`](file:///d:/Projects/RelayGuard/docs/AI_REVIEW_EVIDENCE.md).
+- **Evidence Documentation:** Full analysis against User Impact, Maintenance, and Operating Cost is captured in [`docs/AI_REVIEW_EVIDENCE.md`](docs/AI_REVIEW_EVIDENCE.md).
 
 ---
 
 ## 11. Architecture Decision Record (ADR-001)
 
-A complete architectural record evaluating 4 storage strategies is published at [`docs/ADR-001-idempotency-storage.md`](file:///d:/Projects/RelayGuard/docs/ADR-001-idempotency-storage.md):
+A complete architectural record evaluating 4 storage strategies is published at [`docs/ADR-001-idempotency-storage.md`](docs/ADR-001-idempotency-storage.md):
 1. In-memory deduplication (Rejected: lost on restart/unshared across workers).
 2. Naive check-then-act pattern (Rejected: race conditions under concurrency).
 3. PostgreSQL uniqueness + single atomic transaction (Chosen for local synthetic gateway).
@@ -207,7 +207,7 @@ A complete architectural record evaluating 4 storage strategies is published at 
   - `app/storage.py`: Psycopg 3 schema initialization and connection management.
   - `app/main.py`: Atomic PostgreSQL replay-safe gateway.
   - `app/baseline.py`: PostgreSQL defective baseline.
-  - `tests/conftest.py` & `tests/test_replay_protection.py`: 8 comprehensive PostgreSQL integration tests.
+  - `tests/conftest.py` & `tests/test_replay_protection.py`: 10 comprehensive PostgreSQL integration and security tests.
   - `scripts/measure.py`: 100-request benchmark tool.
   - Supporting documentation: `HANDOFF.md`, `problem.md`, `intent.md`, `memory.md`, `security.md`, `docs/ADR-001-idempotency-storage.md`, `docs/AI_REVIEW_EVIDENCE.md`, `docs/TEST_REPORT.md`, `docs/LOOM_SCRIPT.md`.
 
@@ -219,16 +219,16 @@ A complete architectural record evaluating 4 storage strategies is published at 
 - **Loom Video ($\le$ 5 minutes):** `[PENDING — Candidate to record using docs/LOOM_SCRIPT.md and insert URL]`
 - **Repository URL:** https://github.com/AtifAli90/RelayGuard
 - **Focused Diff / Commit Link:** https://github.com/AtifAli90/RelayGuard/commits/main
-- **Test Run Evidence:** Captured in [`docs/TEST_REPORT.md`](file:///d:/Projects/RelayGuard/docs/TEST_REPORT.md).
+- **Test Run Evidence:** Captured in [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md).
 - **Measurement Output:** Captured in Section 9 above.
-- **AI Review Evidence:** Captured in [`docs/AI_REVIEW_EVIDENCE.md`](file:///d:/Projects/RelayGuard/docs/AI_REVIEW_EVIDENCE.md).
+- **AI Review Evidence:** Captured in [`docs/AI_REVIEW_EVIDENCE.md`](docs/AI_REVIEW_EVIDENCE.md).
 
 ### Next-Engineer Exercise
-The next engineer is invited to extend RelayGuard by adding support for a second action type (`archive_record`) while adhering to the payload hash contract. Full instructions and checklist are provided in [`HANDOFF.md`](file:///d:/Projects/RelayGuard/HANDOFF.md).
+The next engineer is invited to extend RelayGuard by adding support for a second action type (`archive_record`) while adhering to the payload hash contract. Full instructions and checklist are provided in [`HANDOFF.md`](HANDOFF.md).
 
 ### Final Results Summary
 - **Elapsed Engineering Effort:** ~45 minutes (timed Quest implementation).
-- **Automated Test Result:** 8 passed, 1 warning in 4.93s.
+- **Automated Test Result:** 10 passed, 1 warning.
 - **Baseline Effects Created:** 100 effects for 100 requests.
 - **Fixed Effects Created:** 1 effect for 100 requests (99 duplicates prevented).
 - **Remaining Limitations:** Unauthenticated API (demo scope); local PostgreSQL transaction only (external providers require Transactional Outbox).

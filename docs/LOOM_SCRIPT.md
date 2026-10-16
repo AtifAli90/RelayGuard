@@ -17,7 +17,7 @@
 - **On Screen:** `intent.md` (Table 1: Candidate Quality Problems)
 - **Narration:**
   > "In `intent.md`, we evaluated three candidate reliability issues using a weighted rubric across User Impact, Maintenance, and Operating Cost.
-  > While N+1 queries and input validation scored 3.8 and 3.3, duplicate agent side effects scored 4.5 out of 5.0.
+  > While N+1 queries and input validation scored 3.7 and 3.3, duplicate agent side effects scored 4.5 out of 5.0.
   > Duplicating consequential tool effects directly damages user trust and incurs compounding operational cleanup costs. That's why we focused our efforts here."
 
 ### 0:55 – 1:25: Baseline Reproduction & Empirical Measurement

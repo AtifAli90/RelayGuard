@@ -1,6 +1,6 @@
 # RelayGuard Test & Verification Report
 
-> **Generated:** 2026-10-15
+> **Generated:** 2026-10-16
 > **Environment:** Windows 11 (AMD64), Python 3.14.3, PostgreSQL 18.3 & PostgreSQL 16 (Docker Compose)
 > **Test Framework:** pytest 9.0.3, TestClient (Starlette/HTTPX)
 
@@ -20,23 +20,25 @@ platform win32 -- Python 3.14.3, pytest-9.0.3, pluggy-1.6.0 -- C:\Python314\pyth
 cachedir: .pytest_cache
 rootdir: D:\Projects\RelayGuard
 plugins: anyio-4.13.0, langsmith-0.9.2
-collecting ... collected 8 items
+collecting ... collected 10 items
 
-tests/test_replay_protection.py::test_baseline_reproduces_duplicate_effects PASSED [ 12%]
-tests/test_replay_protection.py::test_exact_replays_create_one_effect_and_return_cached_result PASSED [ 25%]
-tests/test_replay_protection.py::test_reusing_key_with_different_payload_is_rejected PASSED [ 37%]
-tests/test_replay_protection.py::test_invalid_requests_are_rejected_and_create_no_effects PASSED [ 50%]
-tests/test_replay_protection.py::test_concurrent_replays_create_one_effect PASSED [ 62%]
-tests/test_replay_protection.py::test_database_failure_atomicity_and_recovery PASSED [ 75%]
-tests/test_replay_protection.py::test_healthz_endpoint PASSED            [ 87%]
-tests/test_replay_protection.py::test_repeatability_with_multiple_actions PASSED [100%]
+tests/test_replay_protection.py::test_baseline_reproduces_duplicate_effects PASSED [ 10%]
+tests/test_replay_protection.py::test_exact_replays_create_one_effect_and_return_cached_result PASSED [ 20%]
+tests/test_replay_protection.py::test_reusing_key_with_different_payload_is_rejected PASSED [ 30%]
+tests/test_replay_protection.py::test_invalid_requests_are_rejected_and_create_no_effects PASSED [ 40%]
+tests/test_replay_protection.py::test_concurrent_replays_create_one_effect PASSED [ 50%]
+tests/test_replay_protection.py::test_database_failure_atomicity_and_recovery PASSED [ 60%]
+tests/test_replay_protection.py::test_healthz_endpoint PASSED            [ 70%]
+tests/test_replay_protection.py::test_repeatability_with_multiple_actions PASSED [ 80%]
+tests/test_replay_protection.py::test_database_unavailability_returns_503_and_masks_secrets PASSED [ 90%]
+tests/test_replay_protection.py::test_mask_database_url_helper_redacts_credentials PASSED [100%]
 
 ============================== warnings summary ===============================
 fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
   from starlette.testclient import TestClient as TestClient  # noqa
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-======================== 8 passed, 1 warning in 4.93s =========================
+======================= 10 passed, 1 warning in 18.27s ========================
 ```
 
 ---
@@ -53,6 +55,8 @@ fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starle
 | `test_database_failure_atomicity_and_recovery` | PostgreSQL trigger fault injection & atomic rollback | `SELECT COUNT(*) FROM actions/effects` == 0 during fault | **PASSED** |
 | `test_healthz_endpoint` | Operational health check | Connectivity probe (`SELECT 1`) -> 200 | **PASSED** |
 | `test_repeatability_with_multiple_actions` | Clean multi-key isolation and repeat execution | Exactly 5 actions and 5 effects | **PASSED** |
+| `test_database_unavailability_returns_503_and_masks_secrets` | Service unavailability returns 503 without credential leak | Verifies 503 response and password absence in response body | **PASSED** |
+| `test_mask_database_url_helper_redacts_credentials` | Database URL credential redaction | Verifies password replaced with `***` across connection attempts | **PASSED** |
 
 ---
 
@@ -72,23 +76,23 @@ Environment context:
   OS:              Windows 11 (AMD64)
   Python:          3.14.3
   Database engine: PostgreSQL (PostgreSQL 18.3 on x86_64-windows)
-  Measurement ID:  1b644a01
+  Measurement ID:  d644137c
 ------------------------------------------------------------------------
 Case: baseline-intentionally-defective
-  Idempotency Key:     measure-base-1b644a01
+  Idempotency Key:     measure-base-d644137c
   Requests Attempted:  100
   HTTP 200 Responses:  100
   Effects Created:     100
-  Elapsed Time (ms):   5526.834
-  Avg ms/request:      55.268
+  Elapsed Time (ms):   4057.922
+  Avg ms/request:      40.579
 ------------------------------------------------------------------------
 Case: fixed-idempotency-guard
-  Idempotency Key:     measure-fixed-1b644a01
+  Idempotency Key:     measure-fixed-d644137c
   Requests Attempted:  100
   HTTP 200 Responses:  100
   Effects Created:     1
-  Elapsed Time (ms):   6138.108
-  Avg ms/request:      61.381
+  Elapsed Time (ms):   4183.196
+  Avg ms/request:      41.832
 ------------------------------------------------------------------------
 Duplicate effects prevented in this run: 99
 ========================================================================
@@ -100,4 +104,4 @@ effect prevention (1 effect per logical action).
 
 ### Analysis of Empirical Results:
 1. **Correctness Win:** In the baseline, 100 requests generated 100 synthetic effects in PostgreSQL. In the fixed version, 100 requests generated **1 synthetic effect** (99 duplicates prevented).
-2. **Timing Note:** The fixed version took 6138 ms (61.38 ms/req) vs 5526 ms (55.26 ms/req) for the baseline. The additional transaction synchronization, canonical payload hash computation, and index checks add approximately 6 ms of overhead per request. No performance or latency gain is claimed; the demonstrated benefit is 100% correctness and atomic deduplication.
+2. **Timing Note:** The fixed version took 4183 ms (41.83 ms/req) vs 4057 ms (40.58 ms/req) for the baseline. The additional transaction synchronization, canonical payload hash computation, and index checks add approximately 1.25 ms of overhead per request locally. No performance or latency gain is claimed; the demonstrated benefit is 100% correctness and atomic deduplication.

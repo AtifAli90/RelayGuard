@@ -1,28 +1,29 @@
 # AI Code-Review Evidence & Human Engineering Judgment
 
-> **Status:** Captured working session review artifact.
+> **Status:** Captured Engineering Review & Decision Artifact
 > **Evaluator:** Lead Software Engineer & AI Code Reviewer
-> **Model Used:** Gemini 3.8 Flash / Claude Opus 4.6 (Thinking) via Google Antigravity IDE
+> **Model Context:** AI-Assisted Implementation Review (Gemini 3.8 Flash / Claude Thinking)
+> **Provenance Note:** The candidate code evaluated below is a **reconstructed review archetype** capturing the common check-then-act anti-pattern produced during AI code-generation sessions. It is documented here for rigorous technical analysis and architectural evaluation, rather than presented as an unedited raw session export.
 
 ---
 
 ## 1. Context and Objective
 
-During Phase 2 of the PostgreSQL transition, the coding assistant was prompted to implement concurrency-safe replay protection for `POST /v1/actions`.
+During the migration to PostgreSQL, an AI coding assistant was asked to implement concurrency-safe replay protection for the `POST /v1/actions` endpoint (`publish_update` synthetic action).
 
-Below is the actual proposal reviewed during this session, the rigorous analysis conducted across the three non-negotiable quality dimensions, and the technical decision to reject the naive candidate in favor of atomic `ON CONFLICT` insertion.
+Below is the proposal evaluated during review, the human engineering analysis across the three quality dimensions (User Impact, Maintainability, Operating Cost), the technical reasons for rejecting it, and the implemented atomic correction.
 
 ---
 
 ## 2. The AI Candidate Proposal Evaluated
 
-### Prompt Given:
+### Prompt Archetype:
 > *"Implement the PostgreSQL storage and transaction handling for `execute_action` to prevent duplicate effects on replay."*
 
 ### Candidate Code Excerpt Reviewed:
 
 ```python
-# --- REVIEW CANDIDATE (Vulnerable Check-Then-Act Pattern) ---
+# --- RECONSTRUCTED AI REVIEW CANDIDATE (Vulnerable Check-Then-Act Pattern) ---
 def execute_action(request: ActionRequest) -> dict[str, object]:
     payload_hash = _stable_payload_hash(request)
     connection = connect()
@@ -68,51 +69,70 @@ def execute_action(request: ActionRequest) -> dict[str, object]:
 
 ## 3. Engineering Evaluation Against the Quality Rubric
 
-### Dimension 1: User Impact (Correctness & Trust)
-- **Vulnerability:** **Critical Check-Then-Act Race Condition.**
-  If two requests with the same idempotency key arrive simultaneously (a typical scenario when an agent client has network connection jitter or concurrent worker threads), both transactions execute Step 1 (`SELECT`) concurrently. Neither finds an existing row. Both proceed to execute Step 2 (`INSERT INTO effects`).
-- **Outcome:** Two duplicate synthetic effects are created! Even worse, when the second thread tries to insert into `actions`, it hits a `UniqueViolation`, rolls back, and returns HTTP 500 to the caller, leaving the caller unaware that its action actually executed.
-- **Verdict:** **UNACCEPTABLE.** Defeats the primary reliability mission of RelayGuard.
+### Dimension 1: User Impact (Correctness, Safety & Schema Integrity)
+- **Defect A: Immediate Foreign-Key Schema Violation.**
+  In RelayGuard's PostgreSQL schema (`app/storage.py`), the `effects` table defines a strict foreign key:
+  ```sql
+  idempotency_key TEXT NOT NULL UNIQUE REFERENCES actions(idempotency_key)
+  ```
+  The candidate attempts to insert into `effects` at Step 2 *before* any corresponding record exists in `actions`. In PostgreSQL, this immediately triggers a `ForeignKeyViolation` (`psycopg.errors.ForeignKeyViolation: Key (idempotency_key)=(...) is not present in table "actions"`).
+  **Impact:** Fresh actions would fail immediately with HTTP 500 on their first attempt, breaking the service completely.
+- **Defect B: Theoretical Check-Then-Act Concurrency Race.**
+  Even if insertion order were inverted or foreign keys omitted, the naive check-then-act pattern (`SELECT` followed by `INSERT`) contains an unprotected race window. If two concurrent agent workers submit requests with the same idempotency key simultaneously:
+  1. Both transactions execute Step 1 (`SELECT`) concurrently.
+  2. Both see no existing row.
+  3. Both proceed to execute Step 2, creating duplicate side effects.
+  4. When the second transaction reaches `actions`, it triggers a `UniqueViolation` and returns HTTP 500, leaving the caller believing the action failed when a side effect was already committed.
+- **Verdict:** **UNACCEPTABLE.** Causes immediate schema violations on fresh keys and race-condition data corruption under concurrency.
 
 ### Dimension 2: Maintenance Effort & Debuggability
 - **Flaws:**
-  1. Broad exception handling (`except Exception as exc`) catches unrelated bugs, internal driver state, and leaks raw SQL / driver error messages (`detail=str(exc)`) directly to the API caller.
-  2. The effect is inserted before the action ledger entry, violating foreign key design order and complicating rollback tracing.
-  3. No explicit row-locking or concurrency boundary.
-- **Verdict:** **HIGH REWORK COST.** Debugging intermittent concurrency failures in production would require distributed tracing and database log forensics.
+  1. **Broad Exception Swallowing & Secret Leakage:** `except Exception as exc:` catches all errors and reflects `str(exc)` directly into the HTTP 500 response. This risks exposing database credentials, connection parameters, table names, and internal driver stack traces to callers.
+  2. **Inverted Dependency Order:** Persisting side effects before the controlling action record violates relational integrity and makes transaction rollback tracing error-prone.
+  3. **Lack of Deterministic Connection Cleanup:** Relies on manual commit/rollback without guaranteed resource closure (`finally: connection.close()`), leading to connection leaks under load.
+- **Verdict:** **HIGH REWORK COST.** Diagnosing intermittent concurrency failures and database leaks in production would impose severe engineering overhead.
 
 ### Dimension 3: Operating-Cost Exposure
-- **Downstream Waste:**
-  - Duplicate effect execution creates unnecessary downstream writes and database lock contention.
-  - Estimated 10–15% duplicate effect leakage under moderate concurrent agent retries (empirically confirmed by test runs where thread races bypass check-then-act logic).
-- **Verdict:** **UNNECESSARY DATABASE EXPENSE.**
+- **Downstream Waste & Risk:**
+  - Duplicate effects generate unnecessary writes, storage bloat, and database lock contention.
+  - *Empirical Note:* We distinguish theoretical concurrency vulnerability from measured benchmarks. In an unconstrained baseline without deduplication, duplicate rate is 100% (100 effects for 100 replays). Under this candidate's check-then-act logic, the duplicate leakage rate is non-deterministic and depends on thread interleaving, network latency, and connection pool sizing.
+- **Verdict:** **UNCONTROLLED EXPENSE.** Any window permitting duplicate side effects risks compounding costs in downstream systems.
 
 ---
 
 ## 4. Human Engineering Decision & Implemented Correction
 
-### Decision: **REJECT Candidate; Require Atomic `ON CONFLICT` Key Claim**
+### Decision: **REJECT Candidate; Implement Atomic `ON CONFLICT` Key Claim**
 
-The human reviewer rejected the candidate and required the following design:
-1. **Single Atomic PostgreSQL Transaction:** Use `with connection.transaction():` so failure at any step guarantees total rollback.
-2. **Atomic Insert / Claim:**
+The human reviewer rejected the candidate and required the following production-grade design:
+
+1. **Single Atomic PostgreSQL Transaction:**
+   Enclose all operations within `with connection.transaction():` so that failure at any point guarantees an immediate, clean rollback leaving zero orphan rows.
+2. **Atomic Insert / Claim Before Side Effects:**
+   Claim the idempotency key first using PostgreSQL's native atomic conflict resolution:
    ```sql
    INSERT INTO actions (idempotency_key, payload_hash, result_json)
    VALUES (%s, %s, '{}'::jsonb)
    ON CONFLICT (idempotency_key) DO NOTHING;
    ```
-   If `cur.rowcount == 0`, PostgreSQL's unique index locks the row and tells us the key already exists.
+   If `cur.rowcount == 0`, PostgreSQL's unique index immediately identifies that the key is already claimed, avoiding any check-then-act race window.
 3. **Pessimistic Row Lock on Replay:**
-   `SELECT payload_hash, result_json FROM actions WHERE idempotency_key = %s FOR UPDATE;`
-   Guarantees that concurrent replay readers wait until the in-flight writer commits before inspecting the finalized outcome.
-4. **Structured Error Masking:**
-   Map `psycopg.Error` to a documented, secure HTTP 503 (`Action ledger is temporarily unavailable.`), preventing database schema or credentials from leaking.
+   If claimed, the transaction executes:
+   ```sql
+   SELECT payload_hash, result_json FROM actions WHERE idempotency_key = %s FOR UPDATE;
+   ```
+   This serializes concurrent replay readers behind any in-flight transaction, ensuring cached results are only read after the initial action successfully commits.
+4. **Structured Error Masking & Secret Redaction:**
+   Wrap database calls in specific `except psycopg.Error:` handlers that log sanitized messages without credentials and return a documented, generic HTTP 503 (`Action ledger is temporarily unavailable.`), protecting database topology and credentials.
+5. **Guaranteed Connection Closure:**
+   Connections are closed deterministically in a `finally:` block.
 
 ---
 
 ## 5. Verification of the Corrected Implementation
 
-The corrected implementation was tested under `test_concurrent_replays_create_one_effect` with 10 parallel worker threads executing simultaneous exact replays:
-- **Status:** **PASSED.**
-- **Effects Created:** Exactly **1** effect in PostgreSQL.
-- **HTTP Status:** All 10 requests returned HTTP 200 (1 fresh, 9 replayed). Zero 500 errors or lock collisions.
+The corrected implementation was verified using real PostgreSQL execution:
+- **Concurrency Test (`test_concurrent_replays_create_one_effect`):** 10 worker threads submitted concurrent requests with the identical key:
+  - **Effects Created:** Exactly **1** effect in PostgreSQL.
+  - **HTTP Status:** All 10 requests returned HTTP 200 (1 fresh execution, 9 cached replays). Zero collisions or 500 errors.
+- **Fault Atomicity Test (`test_database_failure_atomicity_and_recovery`):** Injected database trigger aborting effect creation rolled back the entire transaction, leaving 0 action and 0 effect rows, allowing seamless retry recovery.

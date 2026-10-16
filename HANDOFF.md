@@ -11,43 +11,52 @@ From a clean clone on Python 3.11+:
 
 ### Windows PowerShell:
 ```powershell
-# 1. Start PostgreSQL via Docker Compose
+# 1. Create local .env configuration from example template
+Copy-Item .env.example .env
+
+# 2. Start PostgreSQL via Docker Compose
 docker compose up -d --wait db
 
-# 2. Setup virtual environment
+# 3. Setup virtual environment
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 
-# 3. Run automated tests
+# 4. Run automated tests (10 passing scenarios)
 python -m pytest -v
 
-# 4. Run reproducible 100-request before/after measurement
+# 5. Run reproducible 100-request before/after measurement
 python -m scripts.measure
 
-# 5. Run local API server
+# 6. Run local API server
 uvicorn app.main:app --reload
 ```
 
 ### macOS / Linux:
 ```bash
-# 1. Start PostgreSQL via Docker Compose
+# 1. Create local .env configuration from example template
+cp .env.example .env
+
+# 2. Start PostgreSQL via Docker Compose
 docker compose up -d --wait db
 
-# 2. Setup virtual environment
+# 3. Setup virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 
-# 3. Run automated tests
+# 4. Run automated tests (10 passing scenarios)
 python -m pytest -v
 
-# 4. Run reproducible 100-request before/after measurement
+# 5. Run reproducible 100-request before/after measurement
 python -m scripts.measure
 
-# 5. Run local API server
+# 6. Run local API server
 uvicorn app.main:app --reload
 ```
+
+> [!NOTE]
+> **Database Port Configuration:** Docker Compose binds PostgreSQL to host port `5434` (`postgresql://relayguard:relayguard_dev_password@localhost:5434/relayguard`) to prevent conflicts with native PostgreSQL services running on port 5432. If connecting directly to a native PostgreSQL installation on port 5432, adjust `DATABASE_URL` in `.env` accordingly.
 
 ---
 
@@ -81,7 +90,7 @@ Add support for a second synthetic action type: `"archive_record"`.
 
 ### Step-by-Step Instructions:
 
-1. **Inspect the Payload Hash Contract in [`app/main.py`](file:///d:/Projects/RelayGuard/app/main.py):**
+1. **Inspect the Payload Hash Contract in [`app/main.py`](app/main.py):**
    ```python
    canonical = json.dumps(
        {"action_type": request.action_type, "content": request.content},
@@ -97,7 +106,7 @@ Add support for a second synthetic action type: `"archive_record"`.
    ```python
    action_type: Literal["publish_update", "archive_record"]
    ```
-3. **Add Automated Test in [`tests/test_replay_protection.py`](file:///d:/Projects/RelayGuard/tests/test_replay_protection.py):**
+3. **Add Automated Test in [`tests/test_replay_protection.py`](tests/test_replay_protection.py):**
    ```python
    def test_archive_record_action_replay(fixed_client, db_url):
        action = {
@@ -144,7 +153,7 @@ When reviewing pull requests in RelayGuard, check each item:
 - [ ] Is all SQL strictly parameterized (no string interpolation or f-strings)?
 - [ ] Does the change avoid vulnerable check-then-act (`SELECT` then `INSERT`) patterns?
 - [ ] Are Pydantic models configured with `extra="forbid"` and strict bounds?
-- [ ] Are database errors securely mapped to HTTP 503 without leaking stack traces or connection strings?
+- [ ] Are database errors securely mapped to HTTP 503 without leaking credentials or stack traces?
 - [ ] Are connections closed deterministically in `finally` blocks?
 - [ ] Do automated tests assert database state (`_get_count`) in addition to HTTP status codes?
 - [ ] Has `measure.py` been executed to verify no duplicate effects are introduced?

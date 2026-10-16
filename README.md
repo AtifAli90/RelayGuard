@@ -1,47 +1,44 @@
-# RelayGuard — Replay-Safe Execution Gateway for AI-Agent Tool Calls
+# RelayGuard
 
-[![RelayGuard CI](https://github.com/AtifAli90/RelayGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/AtifAli90/RelayGuard/actions)
-![Python](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%2B-336791?logo=postgresql)
-![License](https://img.shields.io/badge/License-MIT-green)
-
-RelayGuard is a focused, production-aware FastAPI service demonstrating **replay-safe execution for AI-agent tool actions**. Built on **PostgreSQL** using atomic transactions, concurrency-safe uniqueness constraints, and deterministic payload hashing, RelayGuard prevents duplicate side effects when tool invocations are replayed following network drops or agent retry loops.
-
-> **Quest Status:** Initial starter scaffold originated as an illustrative SQLite prototype. During the timed engineering assessment, it was migrated end-to-end to PostgreSQL with Docker Compose, Psycopg 3, atomic concurrency handling, trigger-based fault injection testing, and empirical verification.
+> **Replay-safe execution for a synthetic AI-agent tool action.**
+> Built with FastAPI, PostgreSQL 16, and Psycopg 3.
 
 ---
 
-## 1. The Core Flow
+## 1. Executive Summary
 
-The service exposes `POST /v1/actions` for the synthetic `publish_update` action:
+Autonomous AI agents inevitably retry tool calls when encountering transient network timeouts, worker restarts, or orchestration hiccups. Without an atomic idempotency ledger, every replay causes duplicate execution of underlying side effects (duplicate notifications, double billing, or corrupted system state).
+
+**RelayGuard** demonstrates production-aware replay protection for a single synthetic AI-agent action (`POST /v1/actions`, action type: `publish_update`).
+
+### Architecture Overview
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                   CALLER / AI AGENT                      │
-│  POST /v1/actions                                        │
-│  { idempotency_key, action_type, content }               │
-└────────────────────────────┬─────────────────────────────┘
-                             │
-                             ▼
-┌──────────────────────────────────────────────────────────┐
-│               RELAYGUARD FASTAPI GATEWAY                 │
-│  1. Pydantic v2 validation (extra="forbid")              │
-│  2. Compute canonical SHA-256 payload hash               │
-│  3. Single PostgreSQL transaction:                       │
-│     • Claim key via INSERT ... ON CONFLICT DO NOTHING    │
-│     • If claimed: inspect stored hash under FOR UPDATE   │
-│       - Matching: return cached result (replayed: true)  │
-│       - Conflict: HTTP 409 Conflict                      │
-│     • If new: execute synthetic effect & commit ledger   │
-└────────────────────────────┬─────────────────────────────┘
-                             │
-                             ▼
-┌──────────────────────────────────────────────────────────┐
-│                 POSTGRESQL STORAGE                       │
-│  • actions: idempotency_key (PK), payload_hash, result   │
-│  • effects: effect_id (PK), idempotency_key (UNIQUE, FK) │
-└──────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                       AI AGENT CALLER                       │
+│  POST /v1/actions                                           │
+│  { "idempotency_key": "...", "action_type": "...", ... }    │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    RELAYGUARD API GATEWAY                   │
+│  1. Strict Pydantic validation (unknown fields forbidden)   │
+│  2. Compute canonical SHA-256 payload hash                  │
+│  3. Single PostgreSQL transaction:                          │
+│     • Claim key via INSERT ... ON CONFLICT DO NOTHING       │
+│     • If claimed: inspect stored hash under FOR UPDATE      │
+│       - Matching: return cached result (replayed: true)     │
+│       - Conflict: HTTP 409 Conflict                         │
+│     • If new: execute synthetic effect & commit ledger      │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                     POSTGRESQL STORAGE                      │
+│  • actions: idempotency_key (PK), payload_hash, result      │
+│  • effects: effect_id (PK), idempotency_key (UNIQUE, FK)    │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 - **Baseline Implementation:** Intentionally defective. Writes a new synthetic effect to `baseline_effects` on every request, completely ignoring the key.
@@ -57,15 +54,32 @@ No external network calls, payments, or third-party APIs are contacted. This is 
 - Python 3.11+
 - Docker Desktop with Docker Compose (or local PostgreSQL 16+)
 
-### Step 1: Start PostgreSQL via Docker Compose
+### Step 1: Configure Environment Variables
+
+Create your local `.env` file from the provided development template:
+
+**Windows PowerShell:**
+```powershell
+Copy-Item .env.example .env
+```
+
+**macOS / Linux:**
+```bash
+cp .env.example .env
+```
+
+> [!NOTE]
+> The default `.env` sets `DATABASE_URL=postgresql://relayguard:relayguard_dev_password@localhost:5434/relayguard`, matching Docker Compose host port **5434** (which avoids collisions with any native PostgreSQL running on port 5432). If you use a native PostgreSQL service on port 5432, update `DATABASE_URL` in `.env` to point to port 5432.
+
+### Step 2: Start PostgreSQL via Docker Compose
 
 ```bash
 docker compose up -d --wait db
 ```
 
-The database container runs on port `5434` (mapped to internal `5432` to avoid host conflicts) with a health check.
+The database container runs with an automated healthcheck.
 
-### Step 2: Install Python Dependencies
+### Step 3: Install Python Dependencies
 
 **Windows PowerShell:**
 ```powershell
@@ -81,15 +95,25 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-### Step 3: Run Automated Verification Tests
+### Step 4: Run Automated Verification Tests
 
 ```bash
 python -m pytest -v
 ```
 
-Verifies 8 automated scenarios against real PostgreSQL, including exact replay, payload conflict, strict Pydantic rejection, 10-thread concurrent replay, and database trigger fault injection.
+Verifies 10 automated test scenarios against real PostgreSQL:
+1. Baseline defect reproduction (10 requests $\rightarrow$ 10 duplicate effects)
+2. Exact replay deduplication (10 requests $\rightarrow$ exactly 1 effect, 1 fresh, 9 cached)
+3. Payload conflict rejection (HTTP 409 on content mismatch)
+4. Strict Pydantic input validation & extra-field rejection (HTTP 422)
+5. Concurrency safety under race conditions (10 concurrent worker threads $\rightarrow$ 1 effect)
+6. Transactional rollback atomicity (database trigger fault injection and recovery)
+7. Operational health check verification (`GET /healthz`)
+8. Multi-action repeatability and key isolation
+9. Database unavailability error masking (returns HTTP 503 without leaking credentials)
+10. Connection URL credential redaction verification
 
-### Step 4: Run Empirical 100-Request Measurement
+### Step 5: Run Empirical 100-Request Measurement
 
 ```bash
 python -m scripts.measure
@@ -97,7 +121,7 @@ python -m scripts.measure
 
 Sends 100 identical requests to the defective baseline and 100 to the fixed implementation, reporting effect counts, prevented duplicates (99), and local wall-clock timings.
 
-### Step 5: Run Live Presentation & Demonstration
+### Step 6: Run Live Presentation & Demonstration
 
 To execute a live end-to-end demonstration covering health checks, replay deduplication, conflict rejection, 10-thread parallel race testing, and baseline contrast:
 
@@ -151,19 +175,20 @@ docker compose down -v
 
 | File / Folder | Purpose |
 |---|---|
-| [`compose.yaml`](file:///d:/Projects/RelayGuard/compose.yaml) | Docker Compose specification for development PostgreSQL 16 |
-| [`.env.example`](file:///d:/Projects/RelayGuard/.env.example) | Development-only environment template (no secrets committed) |
-| [`app/main.py`](file:///d:/Projects/RelayGuard/app/main.py) | Fixed replay-safe FastAPI service implementation |
-| [`app/baseline.py`](file:///d:/Projects/RelayGuard/app/baseline.py) | Clearly labelled, intentionally defective baseline service |
-| [`app/storage.py`](file:///d:/Projects/RelayGuard/app/storage.py) | Psycopg 3 PostgreSQL schema management & connection handling |
-| [`app/config.py`](file:///d:/Projects/RelayGuard/app/config.py) | Fail-fast environment configuration parser |
-| [`tests/test_replay_protection.py`](file:///d:/Projects/RelayGuard/tests/test_replay_protection.py) | Automated test suite (concurrency, atomicity, conflict, validation) |
-| [`scripts/measure.py`](file:///d:/Projects/RelayGuard/scripts/measure.py) | 100-request before/after measurement tool |
-| [`docs/ADR-001-idempotency-storage.md`](file:///d:/Projects/RelayGuard/docs/ADR-001-idempotency-storage.md) | Architecture Decision Record comparing 4 storage options |
-| [`docs/AI_REVIEW_EVIDENCE.md`](file:///d:/Projects/RelayGuard/docs/AI_REVIEW_EVIDENCE.md) | AI code review analysis evaluating check-then-act vulnerabilities |
-| [`docs/TEST_REPORT.md`](file:///d:/Projects/RelayGuard/docs/TEST_REPORT.md) | Full captured test outputs and benchmark evidence |
-| [`docs/LOOM_SCRIPT.md`](file:///d:/Projects/RelayGuard/docs/LOOM_SCRIPT.md) | 5-minute timed video script and shot list |
-| [`HANDOFF.md`](file:///d:/Projects/RelayGuard/HANDOFF.md) | Next-engineer onboarding guide and exercise |
-| [`problem.md`](file:///d:/Projects/RelayGuard/problem.md) | Problem brief and affected user analysis |
-| [`intent.md`](file:///d:/Projects/RelayGuard/intent.md) | Problem selection scoring rubric & non-goals |
-| [`directive.md`](file:///d:/Projects/RelayGuard/directive.md) | Working directive with acceptance criteria and results appendix |
+| [`compose.yaml`](compose.yaml) | Docker Compose specification for development PostgreSQL 16 |
+| [`.env.example`](.env.example) | Development-only environment template (no secrets committed) |
+| [`app/main.py`](app/main.py) | Fixed replay-safe FastAPI service implementation |
+| [`app/baseline.py`](app/baseline.py) | Clearly labelled, intentionally defective baseline service |
+| [`app/storage.py`](app/storage.py) | Psycopg 3 PostgreSQL schema management & connection handling |
+| [`app/config.py`](app/config.py) | Fail-fast environment configuration parser |
+| [`tests/test_replay_protection.py`](tests/test_replay_protection.py) | Automated test suite (concurrency, atomicity, conflict, validation) |
+| [`scripts/measure.py`](scripts/measure.py) | 100-request before/after measurement tool |
+| [`docs/ADR-001-idempotency-storage.md`](docs/ADR-001-idempotency-storage.md) | Architecture Decision Record comparing 4 storage options |
+| [`docs/AI_REVIEW_EVIDENCE.md`](docs/AI_REVIEW_EVIDENCE.md) | AI code review analysis evaluating check-then-act vulnerabilities |
+| [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md) | Full captured test outputs and benchmark evidence |
+| [`docs/LOOM_SCRIPT.md`](docs/LOOM_SCRIPT.md) | 5-minute timed video script and shot list |
+| [`HANDOFF.md`](HANDOFF.md) | Next-engineer onboarding guide and exercise |
+| [`problem.md`](problem.md) | Problem brief and affected user analysis |
+| [`intent.md`](intent.md) | Problem selection scoring rubric & non-goals |
+| [`directive.md`](directive.md) | Working directive with acceptance criteria and results appendix |
+| [`security.md`](security.md) | Security protocols, threat model matrix, and production roadmap |

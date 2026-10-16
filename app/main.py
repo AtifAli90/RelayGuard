@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,7 +40,7 @@ def _stable_payload_hash(request: ActionRequest) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def create_app(db_url: str | None = None) -> FastAPI:
+def create_app(db_url: str | None = None, init_schema: bool = True) -> FastAPI:
     """Application factory allowing tests and CLI to specify an isolated database URL."""
     application = FastAPI(
         title="RelayGuard",
@@ -49,20 +49,28 @@ def create_app(db_url: str | None = None) -> FastAPI:
     )
     application.state.db_url = db_url
 
-    # Deterministic schema setup on startup
-    initialize_database(db_url)
+    # Deterministic schema setup on startup if database is available
+    if init_schema:
+        try:
+            initialize_database(db_url)
+        except psycopg.Error as exc:
+            logger.warning("Database schema initialization deferred: %s", exc)
 
     @application.get("/healthz", tags=["operations"])
     def healthz() -> dict[str, str]:
         """Verify database connectivity and service health."""
+        connection: psycopg.Connection[dict[str, Any]] | None = None
         try:
-            with connect(application.state.db_url) as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT 1;")
+            connection = connect(application.state.db_url)
+            with connection.cursor() as cur:
+                cur.execute("SELECT 1;")
             return {"status": "ok", "database": "connected"}
-        except Exception as exc:
-            logger.error("Health check failed: %s", exc)
-            raise HTTPException(status_code=503, detail="Database health check failed.") from exc
+        except psycopg.Error as exc:
+            logger.error("Health check database failure: %s", exc)
+            raise HTTPException(status_code=503, detail="Database health check failed.") from None
+        finally:
+            if connection is not None and not connection.closed:
+                connection.close()
 
     @application.post("/v1/actions", tags=["synthetic action"])
     def execute_action(request: ActionRequest) -> dict[str, object]:
@@ -74,9 +82,10 @@ def create_app(db_url: str | None = None) -> FastAPI:
         3. If key is new: creates action ledger entry and synthetic effect row atomically.
         """
         payload_hash = _stable_payload_hash(request)
-        connection = connect(application.state.db_url)
+        connection: psycopg.Connection[dict[str, Any]] | None = None
 
         try:
+            connection = connect(application.state.db_url)
             with connection.transaction():
                 # Step 1: Concurrency-safe atomic key claim.
                 # Avoids check-then-act race conditions under concurrent requests.
@@ -156,13 +165,14 @@ def create_app(db_url: str | None = None) -> FastAPI:
         except HTTPException:
             raise
         except psycopg.Error as exc:
-            logger.error("Database transaction failed for key '%s': %s", request.idempotency_key, exc)
+            logger.error("Database operation failed for key '%s': %s", request.idempotency_key, exc)
             raise HTTPException(
                 status_code=503,
                 detail="Action ledger is temporarily unavailable.",
-            ) from exc
+            ) from None
         finally:
-            connection.close()
+            if connection is not None and not connection.closed:
+                connection.close()
 
     return application
 

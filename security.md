@@ -57,11 +57,11 @@
 - **Content Limits:** 1 to 1,000 characters; whitespace is stripped to prevent empty or whitespace-only submissions.
 
 ### 2.2 Parameterized SQL & Injection Prevention Protocol
-- **Zero Dynamic SQL:** All queries in [`app/main.py`](file:///d:/Projects/RelayGuard/app/main.py), [`app/baseline.py`](file:///d:/Projects/RelayGuard/app/baseline.py), and [`app/storage.py`](file:///d:/Projects/RelayGuard/app/storage.py) utilize Psycopg 3 parameterized query binding (`%s`).
+- **Zero Dynamic SQL:** All queries in [`app/main.py`](app/main.py), [`app/baseline.py`](app/baseline.py), and [`app/storage.py`](app/storage.py) utilize Psycopg 3 parameterized query binding (`%s`).
 - **No String Formatting:** String concatenation, f-strings, and template substitutions are strictly forbidden in SQL execution paths.
 
 ### 2.3 Concurrency & Race-Condition Safety Protocol
-- **The Anti-Pattern Rejected:** Naive check-then-act (`SELECT` followed by `INSERT`) was formally rejected (see [`docs/AI_REVIEW_EVIDENCE.md`](file:///d:/Projects/RelayGuard/docs/AI_REVIEW_EVIDENCE.md)).
+- **The Anti-Pattern Rejected:** Naive check-then-act (`SELECT` followed by `INSERT`) was formally rejected (see [`docs/AI_REVIEW_EVIDENCE.md`](docs/AI_REVIEW_EVIDENCE.md)).
 - **PostgreSQL Atomic Claim:** Keys are claimed via:
   ```sql
   INSERT INTO actions (idempotency_key, payload_hash, result_json)
@@ -75,10 +75,12 @@
 - **Single Transaction Context:** All state mutations occur within `with connection.transaction():`.
 - **Fault Verification:** Verified via automated test `test_database_failure_atomicity_and_recovery`: an injected PostgreSQL trigger raising an internal exception rolls back the entire transaction, leaving zero orphan rows in either `actions` or `effects`.
 
-### 2.5 Structured Error Masking & Information Leakage Prevention
-- **No Stack Trace Leakage:** Database driver errors (`psycopg.Error`) are caught, logged internally to the logger without credentials, and masked behind a standard HTTP 503 (`"Action ledger is temporarily unavailable."`).
-- **No Connection Leaks:** Connection strings, database hostnames, usernames, and raw SQL queries are never exposed in HTTP error responses.
-- **Deterministic Resource Cleanup:** Connections are deterministically closed in `finally` blocks.
+### 2.5 Structured Error Masking & Secret Redaction Protocol
+- **Credential Masking in Errors and Logs:** Database connection URLs are filtered through `mask_database_url` (`app/storage.py`), replacing sensitive passwords with `***` (e.g. `postgresql://user:***@host:port/db`) in all log entries and operational error messages.
+- **Error-Handling Boundary for Connection Setup:** In `app/main.py` and `app/baseline.py`, `connect()` is placed inside the `try ... except psycopg.Error:` block. If database connection setup fails (e.g., database service down or network partition), the error is intercepted and transformed into a generic HTTP 503 (`Action ledger is temporarily unavailable.`) without exposing raw driver traces or credentials.
+- **No Stack Trace / Schema Leakage:** Internal table names, SQL statements, and database engine internals are never included in API responses.
+- **Deterministic Resource Cleanup:** Connections are deterministically closed in `finally` blocks (`if connection is not None and not connection.closed: connection.close()`).
+- **Automated Verification:** Verified by regression tests `test_database_unavailability_returns_503_and_masks_secrets` and `test_mask_database_url_helper_redacts_credentials`.
 
 ### 2.6 Credential & Environment Protection Protocol
 - **No Hardcoded Secrets:** No database passwords or sensitive URLs exist in application code.
@@ -97,6 +99,7 @@
 | **SQL Injection** | Data exfiltration or corruption | 100% parameterized queries via Psycopg 3 | ✅ Mitigated |
 | **Payload Bloat / DoS** | Database storage exhaustion | Pydantic strict length bounds (1,000 char max) | ✅ Mitigated |
 | **Schema / Error Disclosure** | Information leakage to attacker | Generic HTTP 503 error masking without stack traces | ✅ Mitigated |
+| **Credential Leakage in Logs/Errors** | Database password exposed via logs or HTTP | `mask_database_url` redacts passwords; 503 masks details | ✅ Mitigated |
 | **Unauthenticated API Access** | Unauthorized tool invocation | ⚠️ No auth layer (intentionally out of demo scope) | ❌ Demo Boundary |
 | **External Service Double Delivery** | Duplicate third-party webhook/payment | ⚠️ Out of scope (requires Transactional Outbox) | ❌ Demo Boundary |
 

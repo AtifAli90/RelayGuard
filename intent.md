@@ -24,7 +24,7 @@ $$\text{Priority Score} = (\text{User Impact} \times 0.50) + (\text{Maintenance 
 | Candidate Reliability Problem | User Impact (50%) | Maintenance / Rework (30%) | Operating-Cost Exposure (20%) | Weighted Priority | Decision |
 |---|---:|---:|---:|---:|---|
 | **A. Duplicate side effects when a tool call is replayed** | **5** | **4** | **4** | **4.5 / 5.0** | **CHOSEN** |
-| B. N+1 query pattern in an agent entity list endpoint | 3 | 4 | 5 | 3.8 / 5.0 | Defer |
+| B. N+1 query pattern in an agent entity list endpoint | 3 | 4 | 5 | 3.7 / 5.0 | Defer |
 | C. Missing validation on structured agent tool output | 4 | 3 | 2 | 3.3 / 5.0 | Defer |
 
 ### Why Problem A Was Chosen:

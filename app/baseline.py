@@ -6,7 +6,7 @@ request and ignores the idempotency key, reproducing a duplicate-action defect.
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,7 +27,7 @@ class BaselineRequest(BaseModel):
     content: str = Field(min_length=1, max_length=1000)
 
 
-def create_baseline_app(db_url: str | None = None) -> FastAPI:
+def create_baseline_app(db_url: str | None = None, init_schema: bool = True) -> FastAPI:
     """Application factory for the intentionally defective baseline."""
     app = FastAPI(
         title="RelayGuard baseline (intentionally defective)",
@@ -37,13 +37,18 @@ def create_baseline_app(db_url: str | None = None) -> FastAPI:
     app.state.db_url = db_url
 
     # Ensure baseline_effects table exists
-    initialize_database(db_url)
+    if init_schema:
+        try:
+            initialize_database(db_url)
+        except psycopg.Error as exc:
+            logger.warning("Baseline schema initialization deferred: %s", exc)
 
     @app.post("/v1/actions")
     def execute_baseline(request: BaselineRequest) -> dict[str, object]:
         """DEFECT: every delivery creates a new effect, ignoring previous executions."""
-        connection = connect(app.state.db_url)
+        connection: psycopg.Connection[dict[str, Any]] | None = None
         try:
+            connection = connect(app.state.db_url)
             with connection.transaction():
                 cursor = connection.execute(
                     """
@@ -62,10 +67,13 @@ def create_baseline_app(db_url: str | None = None) -> FastAPI:
                     "effect_id": row["effect_id"],
                     "replayed": False,
                 }
+        except HTTPException:
+            raise
         except psycopg.Error as exc:
-            logger.error("Baseline database error: %s", exc)
-            raise HTTPException(status_code=503, detail="Baseline database error.") from exc
+            logger.error("Baseline database operation failed: %s", exc)
+            raise HTTPException(status_code=503, detail="Baseline database error.") from None
         finally:
-            connection.close()
+            if connection is not None and not connection.closed:
+                connection.close()
 
     return app

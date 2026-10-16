@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
+import psycopg
 
 from app.storage import connect
 from app.main import create_app
@@ -257,3 +258,43 @@ def test_repeatability_with_multiple_actions(fixed_client, db_url):
     # 5 actions and 5 effects in total
     assert _get_count(db_url, "actions") == 5
     assert _get_count(db_url, "effects") == 5
+
+
+def test_database_unavailability_returns_503_and_masks_secrets():
+    """When the database is unreachable, requests must return HTTP 503 without leaking credentials."""
+    unreachable_url = "postgresql://user_test:super_secret_pw_999@127.0.0.1:59998/testdb"
+    unreachable_app = create_app(unreachable_url, init_schema=False)
+
+    with TestClient(unreachable_app) as client:
+        # 1. Action endpoint returns HTTP 503
+        action = _sample_action("db-down-test")
+        res = client.post("/v1/actions", json=action)
+        assert res.status_code == 503
+        assert res.json()["detail"] == "Action ledger is temporarily unavailable."
+        assert "super_secret_pw_999" not in res.text
+        assert "59998" not in res.text
+
+        # 2. Healthz endpoint returns HTTP 503
+        health_res = client.get("/healthz")
+        assert health_res.status_code == 503
+        assert health_res.json()["detail"] == "Database health check failed."
+        assert "super_secret_pw_999" not in health_res.text
+
+
+def test_mask_database_url_helper_redacts_credentials():
+    """Verify mask_database_url redacts passwords across various connection URL formats."""
+    from app.storage import mask_database_url, connect
+
+    url_with_password = "postgresql://relayguard:my_sensitive_password@localhost:5434/relayguard"
+    masked = mask_database_url(url_with_password)
+    assert "my_sensitive_password" not in masked
+    assert masked == "postgresql://relayguard:***@localhost:5434/relayguard"
+
+    url_without_password = "postgresql://localhost:5434/relayguard"
+    assert mask_database_url(url_without_password) == url_without_password
+
+    # Verify connect() raises psycopg.OperationalError without exposing credentials
+    with pytest.raises(psycopg.OperationalError) as exc_info:
+        connect("postgresql://test_user:ultra_secret_123@127.0.0.1:59998/relayguard")
+    assert "ultra_secret_123" not in str(exc_info.value)
+    assert "***" in str(exc_info.value)

@@ -13,7 +13,7 @@
 | **Language** | Python 3.11+ |
 | **Database** | PostgreSQL 16+ via Psycopg 3 & Docker Compose |
 | **Framework** | FastAPI + Pydantic v2 |
-| **Updated** | 2026-10-15 |
+| **Updated** | 2026-10-16 |
 | **Status** | Production-Aware Demonstration Complete |
 
 ---
@@ -29,67 +29,57 @@
 ### 🟢 Session 2 — 2026-10-15 (PostgreSQL Transition, Docker Compose & Fault Atomicity)
 
 #### Action 1: Environment & Infrastructure Audit
-- **Time:** 23:15 PKT
-- **What:** Verified Docker Desktop and local PostgreSQL services.
-- **Findings:**
-  - Docker Desktop available with Docker Compose v5.5.1.
-  - PostgreSQL 18 running locally on port 5432.
-  - Compose service configured to expose port 5434:5432 to avoid host port collisions.
+- Verified Docker Desktop and local PostgreSQL services.
+- Docker Compose configured to expose port 5434:5432 to avoid host port collisions.
 
 #### Action 2: PostgreSQL Infrastructure Provisioning
-- **Time:** 23:19 PKT
-- **Files Created / Modified:**
-  - `compose.yaml` — PostgreSQL 16 container with health check and named volume `relayguard_postgres_data`.
-  - `.env.example` — Safe development-only defaults; documented ports.
-  - `.gitignore` — Ignore `.env`, `.env.*`, `*.sqlite3*`, `*.log`, `*.mp4`, test caches.
-  - `requirements.txt` — Added `psycopg[binary]>=3.2.0,<4.0`.
+- Files created: `compose.yaml`, `.env.example`, `requirements.txt` (`psycopg[binary]>=3.2.0,<4.0`).
 
 #### Action 3: Database & Storage Layer Migration
-- **Time:** 23:20 PKT
-- **Files Created / Modified:**
-  - `app/config.py` — Added `get_database_url()` with fail-fast validation and local `.env` parser.
-  - `app/storage.py` — Rewritten for PostgreSQL using Psycopg 3 (`dict_row`). Deterministic schema initialization creating `actions`, `effects`, and `baseline_effects`.
-  - `app/main.py` — Concurrency-safe atomic transaction using `INSERT ... ON CONFLICT DO NOTHING` + row-level locking (`FOR UPDATE`) for replays. Structured error handling mapping `psycopg.Error` to HTTP 503.
-  - `app/baseline.py` — Intentionally defective baseline writing to `baseline_effects` in PostgreSQL.
+- `app/config.py` — `get_database_url()` with fail-fast validation.
+- `app/storage.py` — Psycopg 3 schema initialization.
+- `app/main.py` — Atomic `ON CONFLICT DO NOTHING` + row-level locking (`FOR UPDATE`).
+- `app/baseline.py` — Intentionally defective baseline writing to `baseline_effects`.
 
 #### Action 4: Comprehensive Test Suite & Fault Injection
-- **Time:** 23:22 PKT
-- **File:** `tests/test_replay_protection.py`, `tests/conftest.py`
-- **What:** Built 8 PostgreSQL integration tests:
-  1. Baseline defect reproduction (10 requests -> 10 effects).
-  2. Exact replay (10 requests -> 1 effect, 1 fresh, 9 replayed).
-  3. Payload conflict detection (same key, different content -> HTTP 409).
-  4. Validation & extra-field rejection (HTTP 422).
-  5. Concurrency safety (10 threads in parallel via ThreadPoolExecutor -> 1 effect, 0 race errors).
-  6. **Failure atomicity with DB trigger fault injection**: injected PostgreSQL trigger `fail_effect_insert()` raising an exception, verified total transaction rollback (`_get_count` == 0), dropped trigger, and verified retry succeeds cleanly.
-  7. Operational health check (`GET /healthz` -> 200).
-  8. Multi-action repeatability and test isolation.
-- **Command:** `python -m pytest -v`
-- **Result:** ✅ **8 passed, 1 warning in 4.93s**
+- Built 8 PostgreSQL integration tests (baseline reproduction, exact replay, 409 conflict, 422 validation, 10-thread concurrency, trigger fault injection atomicity, health check, repeatability).
 
 #### Action 5: 100-Request PostgreSQL Measurement
-- **Time:** 23:23 PKT
-- **File:** `scripts/measure.py`
-- **What:** Updated measurement script to test 100 repeated deliveries against PostgreSQL using unique run IDs.
-- **Result:**
-  | Metric | Defective Baseline | Replay-Safe Implementation |
-  |---|---:|---:|
-  | Database Engine | PostgreSQL 18.3 | PostgreSQL 18.3 |
-  | Requests Attempted | 100 | 100 |
-  | HTTP 200 Responses | 100 | 100 |
-  | **Effects Created** | **100** | **1** |
-  | Elapsed Wall-Clock | 5,526.834 ms | 6,138.108 ms |
-  | **Duplicate Effects Prevented** | — | **99** |
+- Executed `scripts/measure.py`: 100 baseline effects vs 1 fixed effect (99 duplicate effects prevented).
 
 #### Action 6: Engineering Artifacts & Review Documentation
-- **Time:** 23:24 – 23:29 PKT
-- **Files Created:**
-  - `docs/ADR-001-idempotency-storage.md` — Complete ADR evaluating 4 storage options.
-  - `docs/AI_REVIEW_EVIDENCE.md` — Real AI candidate check-then-act code review across the 3 quality dimensions.
-  - `docs/TEST_REPORT.md` — Full test output and measurement evidence.
-  - `docs/LOOM_SCRIPT.md` — Timed 5-minute video storyboard and shot list.
-  - `HANDOFF.md` — Reproduction steps, next-engineer exercise, and production outbox guidance.
-  - Updated `README.md`, `problem.md`, `intent.md`, `directive.md`, `security.md`.
+- Created ADR-001, AI review evidence, test report, Loom script, handoff guide.
+
+---
+
+### 🟢 Session 3 — 2026-10-16 (Final Quest Readiness Audit & Hardening)
+
+#### Action 7: AI Review Evidence Provenance & Technical Audit (Task 1)
+- Audited `docs/AI_REVIEW_EVIDENCE.md` against `app/storage.py` schema.
+- Identified that the candidate inserted into `effects` before `actions`, which immediately violates PostgreSQL's foreign key constraint (`ForeignKeyViolation`) on fresh keys.
+- Clarified provenance: explicitly documented that the proposal is a reconstructed review archetype representing the check-then-act anti-pattern, rather than an unedited raw session export.
+- Removed unsupported empirical percentages; clearly distinguished theoretical concurrency race windows from measured benchmarks.
+
+#### Action 8: Database Error Normalization & Secret Redaction (Task 2)
+- Added `mask_database_url()` in `app/storage.py` to redact credentials (`user:***@host:port/db`) in error messages and logs.
+- Moved `connect()` inside `try ... except psycopg.Error:` boundary in `app/main.py` and `app/baseline.py`.
+- Handled database connection failures cleanly by returning HTTP 503 (`Action ledger is temporarily unavailable.`) without leaking database credentials, URLs, or internal driver stack traces.
+- Guaranteed deterministic connection cleanup in `finally:` blocks.
+- Added 2 new automated regression tests (`test_database_unavailability_returns_503_and_masks_secrets` and `test_mask_database_url_helper_redacts_credentials`). Test suite now passes 10/10.
+
+#### Action 9: Environment Configuration Realignment (Task 3)
+- Realigned default `DATABASE_URL` in `.env.example` to match Docker Compose host port `5434`.
+- Added clear documentation in `README.md` and `HANDOFF.md` for copying `.env.example` to `.env` (`Copy-Item` / `cp`) and distinguishing Docker port 5434 from native PostgreSQL port 5432.
+
+#### Action 10: Relative Repository Links & Scoring Calculation Fix (Task 4)
+- Replaced all absolute `file:///` URLs across all markdown files with clean relative repository links.
+- Corrected Candidate B's weighted priority score in `intent.md` and `docs/LOOM_SCRIPT.md`: `(3 * 0.50) + (4 * 0.30) + (5 * 0.20) = 3.7 / 5.0` (corrected from 3.8).
+
+#### Action 11: Verification Execution (Task 5)
+- Ran `python -m pytest -v`: 10 passed, 0 failed.
+- Ran `python -m scripts.measure`: 100 baseline vs 1 fixed effect (99 prevented).
+- Ran `python -m scripts.demo_live`: 7 phases passed.
+- Ran `git diff --check`: 0 whitespace issues, exit code 0.
 
 ---
 
@@ -102,6 +92,8 @@
 | 3 | Single Transaction Boundary | Guarantees synthetic effect and action record commit together or rollback together | Separate commits, check-after-commit |
 | 4 | Trigger-Based Fault Injection | Tests real database engine transaction rollback under unhandled exceptions | Mocking the database driver (does not prove engine atomicity) |
 | 5 | Docker Compose for Dev Environment | Zero-friction local startup with health check and isolated volumes | Requiring manual PostgreSQL installation |
+| 6 | Redact Connection Credentials via `mask_database_url` | Prevents database passwords from leaking into logs, exception objects, or HTTP responses | Exposing raw connection strings in error traces |
+| 7 | Intercept Connection Failure inside HTTP 503 Boundary | Guarantees documented HTTP 503 response when database is unreachable | Unhandled 500 Internal Server Error |
 
 ---
 
@@ -116,10 +108,12 @@
 | 5 | Invalid content & extra fields return 422 | ✅ PASSED | `test_invalid_requests_are_rejected_and_create_no_effects` |
 | 6 | Concurrent replay covered by automated test | ✅ PASSED | `test_concurrent_replays_create_one_effect` (10 threads) |
 | 7 | Failure atomicity verified with DB fault injection | ✅ PASSED | `test_database_failure_atomicity_and_recovery` |
-| 8 | Automated checks pass on final commit | ✅ PASSED | `8 passed in 4.93s` |
-| 9 | Focused diff with zero unrelated refactors | ✅ PASSED | Strictly 1 flow, verified files only |
-| 10 | ADR evaluates 4 alternatives with trade-offs | ✅ PASSED | `docs/ADR-001-idempotency-storage.md` |
-| 11 | AI code review candidate analyzed & rejected | ✅ PASSED | `docs/AI_REVIEW_EVIDENCE.md` |
-| 12 | Engineering handoff guide complete | ✅ PASSED | `HANDOFF.md` |
-| 13 | Loom video recorded ($\le$ 5 min) | 🔲 CANDIDATE ACTION | Script in `docs/LOOM_SCRIPT.md` |
-| 14 | External repository linked | ✅ PASSED | https://github.com/AtifAli90/RelayGuard |
+| 8 | Database unavailability error masking & secret redaction | ✅ PASSED | `test_database_unavailability_returns_503_and_masks_secrets` |
+| 9 | Connection URL credential masking helper | ✅ PASSED | `test_mask_database_url_helper_redacts_credentials` |
+| 10 | Automated checks pass on final commit | ✅ PASSED | `10 passed in 18.27s` |
+| 11 | Focused diff with zero unrelated refactors | ✅ PASSED | Strictly 1 flow, verified files only |
+| 12 | ADR evaluates 4 alternatives with trade-offs | ✅ PASSED | `docs/ADR-001-idempotency-storage.md` |
+| 13 | AI code review candidate analyzed & rejected | ✅ PASSED | `docs/AI_REVIEW_EVIDENCE.md` |
+| 14 | Engineering handoff guide complete | ✅ PASSED | `HANDOFF.md` |
+| 15 | Loom video recorded ($\le$ 5 min) | 🔲 CANDIDATE ACTION | Script in `docs/LOOM_SCRIPT.md` |
+| 16 | External repository linked | ✅ PASSED | https://github.com/AtifAli90/RelayGuard |

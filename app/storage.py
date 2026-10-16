@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import psycopg
 from psycopg.rows import dict_row
@@ -17,24 +18,43 @@ from app.config import get_database_url
 logger = logging.getLogger("relayguard.storage")
 
 
+def mask_database_url(url: str) -> str:
+    """Mask password credentials in a database connection URL for safe diagnostics."""
+    try:
+        parsed = urlsplit(url)
+        if parsed.password is not None:
+            user = parsed.username or ""
+            host = parsed.hostname or ""
+            port = f":{parsed.port}" if parsed.port else ""
+            netloc = f"{user}:***@{host}{port}"
+            return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+        return url
+    except Exception:
+        return "postgresql://***:***@***"
+
+
 def connect(db_url: str | None = None) -> psycopg.Connection[dict[str, Any]]:
-    """Open a PostgreSQL connection using Psycopg 3 with dict_row factory."""
+    """Open a PostgreSQL connection using Psycopg 3 with dict_row factory.
+
+    Raises psycopg.OperationalError with sanitized error text if connection fails,
+    ensuring credentials and passwords are never exposed.
+    """
     resolved_url = db_url or get_database_url()
     try:
         connection = psycopg.connect(
             resolved_url,
             row_factory=dict_row,
             autocommit=False,
-            connect_timeout=10,
+            connect_timeout=5,
         )
         return connection
-    except psycopg.OperationalError as exc:
-        logger.error("Failed to connect to PostgreSQL database: %s", exc)
-        raise RuntimeError(
-            f"Could not connect to PostgreSQL at '{resolved_url}'. "
-            "Ensure the database is running (e.g. 'docker compose up -d --wait db') "
-            "and DATABASE_URL is properly configured."
-        ) from exc
+    except psycopg.OperationalError:
+        masked = mask_database_url(resolved_url)
+        logger.error("Failed to connect to PostgreSQL database at '%s'", masked)
+        raise psycopg.OperationalError(
+            f"Could not connect to PostgreSQL at '{masked}'. "
+            "Ensure the database service is running and accessible."
+        ) from None
 
 
 def initialize_database(db_url: str | None = None) -> None:
@@ -45,7 +65,8 @@ def initialize_database(db_url: str | None = None) -> None:
     - `effects`: synthetic tool execution effects with foreign key and unique constraint.
     - `baseline_effects`: intentionally unconstrained table used ONLY to reproduce the defect.
     """
-    with connect(db_url) as conn:
+    conn = connect(db_url)
+    try:
         with conn.transaction():
             conn.execute(
                 """
@@ -75,10 +96,17 @@ def initialize_database(db_url: str | None = None) -> None:
                 );
                 """
             )
+    finally:
+        if not conn.closed:
+            conn.close()
 
 
 def truncate_tables(db_url: str | None = None) -> None:
     """Helper to safely truncate tables for clean test repeatability."""
-    with connect(db_url) as conn:
+    conn = connect(db_url)
+    try:
         with conn.transaction():
             conn.execute("TRUNCATE TABLE effects, actions, baseline_effects RESTART IDENTITY CASCADE;")
+    finally:
+        if not conn.closed:
+            conn.close()
