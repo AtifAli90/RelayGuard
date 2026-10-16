@@ -32,9 +32,8 @@ tests/test_replay_protection.py::test_healthz_endpoint PASSED            [ 87%]
 tests/test_replay_protection.py::test_repeatability_with_multiple_actions PASSED [100%]
 
 ============================== warnings summary ===============================
-C:\Users\HMAT Technologies\AppData\Roaming\Python\Python314\site-packages\fastapi\testclient.py:1
-  C:\Users\HMAT Technologies\AppData\Roaming\Python\Python314\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
-    from starlette.testclient import TestClient as TestClient  # noqa
+fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+  from starlette.testclient import TestClient as TestClient  # noqa
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
 ======================== 8 passed, 1 warning in 4.93s =========================
